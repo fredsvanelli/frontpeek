@@ -38,6 +38,41 @@
     return TUNNEL + encodeURIComponent(abs.href);
   }
 
+  // Cookies written from JS (document.cookie — used by @supabase/ssr's
+  // browser client, js-cookie, etc.) default to SameSite=Lax, which Chromium
+  // rejects here: the preview iframe is cross-site relative to the webview's
+  // vscode-webview:// top-level origin. Rewrite every JS cookie write to
+  // SameSite=None; Secure (accepted over http on localhost — trustworthy
+  // origin) so client-side sessions survive inside the preview. The proxy
+  // applies the same rewrite to server Set-Cookie headers.
+  try {
+    const cookieDesc =
+      Object.getOwnPropertyDescriptor(Document.prototype, 'cookie') ||
+      Object.getOwnPropertyDescriptor(HTMLDocument.prototype, 'cookie');
+    if (cookieDesc && cookieDesc.set) {
+      Object.defineProperty(document, 'cookie', {
+        configurable: true,
+        get() {
+          return cookieDesc.get.call(document);
+        },
+        set(v) {
+          let out = String(v);
+          try {
+            out =
+              out
+                .split(';')
+                .filter((p) => {
+                  const k = p.trim().toLowerCase();
+                  return !k.startsWith('samesite') && k !== 'secure';
+                })
+                .join(';') + '; SameSite=None; Secure';
+          } catch {}
+          cookieDesc.set.call(document, out);
+        },
+      });
+    }
+  } catch {}
+
   const origFetch = window.fetch;
   window.fetch = function (input, init) {
     try {

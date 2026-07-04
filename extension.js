@@ -162,6 +162,30 @@ function stripHopByHop(headers) {
   return out;
 }
 
+// The preview iframe is cross-site from the browser's point of view (the
+// webview's top-level origin is vscode-webview://...), so Chromium silently
+// drops Set-Cookie headers carrying SameSite=Lax/Strict — the default of
+// virtually every cookie-session library (@supabase/ssr, next-auth,
+// iron-session). The login POST succeeds upstream but the session cookie
+// never sticks, and the next request bounces back to the login page.
+// Rewrite to SameSite=None; Secure — Chromium accepts Secure cookies from
+// http://localhost because loopback is a trustworthy origin. Domain is
+// stripped too: the browser talks to localhost:<proxyport>, so a Domain
+// pinned to another dev host would get the cookie rejected outright.
+function rewriteSetCookieForWebview(headers) {
+  const sc = headers['set-cookie'];
+  if (!sc) return;
+  headers['set-cookie'] = (Array.isArray(sc) ? sc : [sc]).map((line) => {
+    const parts = String(line)
+      .split(';')
+      .filter((p) => {
+        const k = p.trim().toLowerCase();
+        return !k.startsWith('samesite') && k !== 'secure' && !k.startsWith('domain');
+      });
+    return parts.join(';') + '; SameSite=None; Secure';
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Cross-origin tunnel: cookie jar
 //
@@ -399,6 +423,7 @@ function startProxy(context, targetUrl) {
           const headers = stripHopByHop(upstream.headers);
           delete headers['x-frame-options'];
           delete headers['content-security-policy'];
+          rewriteSetCookieForWebview(headers);
 
           const isHtml = (upstream.headers['content-type'] || '').includes('text/html');
           if (!isHtml) {
