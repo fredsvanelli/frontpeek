@@ -748,7 +748,8 @@ async function resolveStack(stackText) {
   log('Batch: no frame resolved to a project file');
 
   // Fallback: resolve the source maps ourselves when the Next endpoint does
-  // not map the frames (on Next 16 both endpoints are gone). Server frames
+  // not map the frames (some Next 16 builds drop the endpoints; 16.2 has the
+  // batch one back with line1/column1 field names). Server frames
   // read the SSR chunk from disk (.next/dev/server/...); client frames —
   // elements rendered by 'use client' components carry browser chunk URLs —
   // fetch the chunk's source map from the dev server over HTTP.
@@ -858,7 +859,10 @@ async function fetchOriginalFramesBatch(frames, isServer) {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      frames,
+      // Next <= 15 reads lineNumber/column; Next 16.2+ reads line1/column1
+      // (missing fields make it map position 1:0 and echo the frame back
+      // unmapped) — send both shapes.
+      frames: frames.map((f) => ({ ...f, line1: f.lineNumber, column1: f.column })),
       isServer,
       isEdgeServer: false,
       isAppDirectory: true,
@@ -922,12 +926,53 @@ async function trySourceMaps(frames) {
   // long-lived cache would go stale after an edit
   const remoteCache = new Map();
   for (const frame of frames) {
-    const picked = /^https?:\/\//.test(frame.file)
-      ? await tryRemoteFrame(frame, tried, remoteCache)
-      : tryDiskFrame(frame, tried);
+    let picked = null;
+    if (/^https?:\/\//.test(frame.file)) {
+      picked = await tryRemoteFrame(frame, tried, remoteCache);
+    } else if (frame.file.startsWith('webpack-internal:')) {
+      picked = await tryWebpackInternalFrame(frame, tried, remoteCache);
+    } else {
+      picked = tryDiskFrame(frame, tried);
+    }
     if (picked) return picked;
   }
   return null;
+}
+
+// Webpack-mode frames name eval'd modules (webpack-internal:///...), which
+// are not fetchable over HTTP — but Next's /__nextjs_source-map endpoint
+// resolves the module's map straight from the compilation (webpack and
+// turbopack middlewares both accept these URLs as `filename`).
+async function tryWebpackInternalFrame(frame, tried, cache) {
+  if (!currentTargetOrigin || nextEndpointMissing.sourceMap) return null;
+  const key = `${frame.file}:${frame.lineNumber}:${frame.column}`;
+  if (tried.has(key)) return null;
+  tried.add(key);
+
+  let entry = cache.get(frame.file);
+  if (!entry) {
+    entry = { map: null };
+    cache.set(frame.file, entry);
+    try {
+      const res = await fetch(
+        `${currentTargetOrigin}/__nextjs_source-map?filename=${encodeURIComponent(frame.file)}`
+      );
+      if (nextEndpointGone(res)) nextEndpointMissing.sourceMap = true;
+      else if (res.ok) {
+        try {
+          entry.map = JSON.parse(await res.text());
+        } catch {}
+      }
+    } catch (err) {
+      log(`  webpack-internal: GET source map failed: ${err.message}`);
+    }
+  }
+  if (!entry.map) {
+    log(`  webpack-internal: no source map for ${frame.file}`);
+    return null;
+  }
+  const label = `webpack-internal: ${frame.file.split('/').pop()}`;
+  return pickOriginal(entry.map, frame.lineNumber - 1, frame.column - 1, label, frame.column, frame.file);
 }
 
 // Server frames: the compiled SSR chunk sits on disk (.next/dev/server/...)
@@ -1046,7 +1091,11 @@ function pickOriginal(map, line0, col0, label, dispColumn, base) {
   const orig = lookupInMap(map, line0, col0);
   if (!orig || !orig.source) return null;
   let uri = null;
-  if (isProjectSource(orig.source)) uri = resolveFile(orig.source);
+  // Webpack module maps name their sources as pseudo-URLs
+  // (webpack://_N_E/./src/x.tsx) — normalize before judging, the position is
+  // already properly mapped here.
+  const src = stripBundlerPrefix(orig.source);
+  if (isProjectSource(src)) uri = resolveFile(src);
   if (!uri && base) {
     const abs = resolveAgainstBase(orig.source, base);
     if (abs && isProjectSource(abs)) uri = resolveFile(abs);
@@ -1263,20 +1312,22 @@ function extractResolved(result, label) {
     log(`  ${label}: resolved to ${osf.file}, but the file does not exist in the workspace`);
     return null;
   }
-  log(`  ${label}: resolved ${osf.file}:${osf.lineNumber} -> ${uri.fsPath}`);
-  return { uri, lineNumber: osf.lineNumber || 1, columnNumber: osf.column || 1 };
+  // Next <= 15 responds with lineNumber/column, Next 16.2+ with line1/column1.
+  const lineNumber = osf.lineNumber ?? osf.line1;
+  const columnNumber = osf.column ?? osf.column1;
+  log(`  ${label}: resolved ${osf.file}:${lineNumber} -> ${uri.fsPath}`);
+  return { uri, lineNumber: lineNumber || 1, columnNumber: columnNumber || 1 };
 }
 
-function resolveFile(fileName) {
-  if (!fileName) return null;
-
-  // Normalize the various webpack/turbopack/RSC path formats, e.g.:
-  //   webpack-internal:///(app-pages-browser)/./src/components/Card.tsx
-  //   turbopack://[project]/src/app/page.tsx
-  //   rsc://React/Server/file:///Users/x/proj/src/app/page.tsx?42
-  //   [project]/src/app/page.tsx
-  //   ./src/app/page.tsx
-  let file = fileName
+// Normalizes the various webpack/turbopack/RSC path formats, e.g.:
+//   webpack-internal:///(app-pages-browser)/./src/components/Card.tsx
+//   webpack://_N_E/./src/components/Card.tsx
+//   turbopack://[project]/src/app/page.tsx
+//   rsc://React/Server/file:///Users/x/proj/src/app/page.tsx?42
+//   [project]/src/app/page.tsx
+//   ./src/app/page.tsx
+function stripBundlerPrefix(fileName) {
+  return String(fileName)
     .replace(/^rsc:\/\/React\/[^/]+\//, '')
     .replace(/\?\d+$/, '')
     .replace(/^webpack-internal:\/\/\/(\([^)]*\)\/)?/, '')
@@ -1285,6 +1336,12 @@ function resolveFile(fileName) {
     .replace(/^\[project\]\//, '')
     .replace(/^file:\/\//, '')
     .replace(/^\.\//, '');
+}
+
+function resolveFile(fileName) {
+  if (!fileName) return null;
+
+  let file = stripBundlerPrefix(fileName);
 
   // never open a compiled artifact
   if (/(^|[/\\])\.next[/\\]/.test(file)) return null;
