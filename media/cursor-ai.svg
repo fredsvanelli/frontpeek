@@ -1,6 +1,0 @@
-<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <!-- cursor arrow -->
-  <path d="M3.55 6.55 L9.56 20.97 L11.69 14.69 L17.97 12.56 Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
-  <!-- AI sparkle (top right) -->
-  <path d="M18.75 1.5 Q19.1 4.65 22.25 5 Q19.1 5.35 18.75 8.5 Q18.4 5.35 15.25 5 Q18.4 4.65 18.75 1.5 Z" fill="currentColor"/>
-</svg>

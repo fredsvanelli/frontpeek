@@ -1,11 +1,26 @@
-// FrontPeek — inspector script injected by the proxy into the Next.js page.
-// Modes: 'edit' (click opens the source in the editor), 'ai' (click opens
-// a floating prompt panel; Enter builds a structured prompt that the
-// extension copies to the clipboard) and 'css' (click opens a tabbed style
-// editor; edits preview live and the confirmed deltas become the prompt).
-(function () {
-  if (window.__PV_INSTALLED__) return;
+// FrontPeek — element inspector.
+//
+// Ported from the extension's media/inspector.js, essentially verbatim. Modes:
+// 'edit' (click reports the source so the toolbar can open it or copy the
+// path), 'ai' (click opens a prompt panel; Enter builds a structured prompt)
+// and 'css' (click opens a tabbed live style editor whose deltas become the
+// prompt). It communicates with the toolbar over `window.postMessage`; when the
+// page is unframed `window.parent === window`, so those messages are delivered
+// in-page.
+//
+// Wrapped as installInspector() returning { destroy }. Teardown removes every
+// listener and restores the patched History methods so the component can be
+// unmounted cleanly (React StrictMode mounts effects twice in dev).
+
+export function installInspector() {
+  if (window.__PV_INSTALLED__) return { destroy: function () {} };
   window.__PV_INSTALLED__ = true;
+
+  var teardownListeners = [];
+  function on(target, type, fn, opts) {
+    target.addEventListener(type, fn, opts);
+    teardownListeners.push([target, type, fn, opts]);
+  }
 
   let mode = null; // null | 'edit' | 'ai' | 'css'
   let hovered = null;
@@ -14,25 +29,21 @@
   let ta = null;
   let copyBtn = null;
   let copyLbl = null;
-  let pending = null; // context of the AI-mode click
+  let pending = null;
 
-  // Keep the last few JS errors for diagnostics (if React fails to hydrate,
-  // the reason shows up here).
   const pageErrors = [];
   function pushError(msg) {
     pageErrors.push(String(msg).slice(0, 300));
     if (pageErrors.length > 5) pageErrors.shift();
   }
-  window.addEventListener('error', (e) => {
+  on(window, 'error', (e) => {
     pushError((e.message || e.error) + (e.filename ? ' @ ' + e.filename + ':' + e.lineno : ''));
   });
-  window.addEventListener('unhandledrejection', (e) => {
+  on(window, 'unhandledrejection', (e) => {
     const r = e.reason;
     pushError('unhandledrejection: ' + ((r && (r.stack || r.message)) || r));
   });
 
-  // DOM-node -> fiber key across React versions: React 17+ tags nodes with
-  // __reactFiber$<random>, React 16 with __reactInternalInstance$<random>.
   function fiberKeyOf(node) {
     const keys = Object.getOwnPropertyNames(node);
     for (const k of keys) {
@@ -42,7 +53,6 @@
     return null;
   }
 
-  // Checks whether React mounted anywhere on the page
   function reactDetected() {
     const els = document.querySelectorAll('body, body *');
     const limit = Math.min(els.length, 400);
@@ -76,7 +86,6 @@
     'border-radius:7px;padding:5px 12px;font-size:12px;font-weight:600;cursor:pointer !important;font-family:inherit;flex-shrink:0;}' +
     '#__pv-panel .__pv-copy:hover:not(:disabled),#__pv-css-panel .__pv-copy:hover:not(:disabled){filter:brightness(1.15);}' +
     '#__pv-panel .__pv-copy:disabled,#__pv-css-panel .__pv-copy:disabled{background:#3f3f46;color:#a1a1aa;cursor:default !important;filter:none;}' +
-    // CSS-mode editor panel
     '#__pv-css-panel{position:fixed;z-index:2147483647;width:420px;max-width:calc(100vw - 16px);' +
     'background:rgba(24,24,27,.97);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);' +
     'border:1px solid rgba(255,255,255,.12);border-radius:12px;' +
@@ -146,19 +155,15 @@
     );
   }
 
-  // FrontPeek's own overlay UI — the injected toolbar (media/toolbar.js), its
-  // settings popover, and the inspector's AI/CSS panels — must never be
-  // inspectable. Hovering must not outline it and clicking must pass straight
-  // through to its own handlers, so the toolbar stays usable in every mode.
   function isOwnUi(el) {
     return !!(
       el &&
       el.closest &&
-      el.closest('#__pv-toolbar, #__pv-pop, #__pv-panel, #__pv-css-panel')
+      el.closest('#__pv-toolbar, #__pv-pop, #__pv-toast, #__pv-panel, #__pv-css-panel')
     );
   }
 
-  window.addEventListener('message', (e) => {
+  on(window, 'message', (e) => {
     const msg = e.data;
     if (!msg || !msg.type) return;
     if (msg.type === 'pv-set-inspect') {
@@ -168,7 +173,6 @@
         copyBtn.disabled = true;
         copyLbl.textContent = 'Copied!';
       }
-      // show "Copied!" briefly, then fade the panel out
       copiedTimer = setTimeout(fadePanelOut, 500);
     } else if (msg.type === 'pv-css-copied') {
       if (cssCopyBtn) {
@@ -183,96 +187,72 @@
     }
   });
 
-  document.addEventListener(
-    'mousemove',
-    (e) => {
-      if (!mode) return;
-      // with a panel open, freeze hover (keep only the selected outline)
-      if (anyPanelOpen()) return;
-      const target = e.target;
-      if (target === hovered || !(target instanceof Element)) return;
-      if (isOwnUi(target)) { clearHover(); return; }
-      clearHover();
-      hovered = target;
-      hovered.setAttribute('data-pv-hover', '');
-    },
-    true
-  );
+  on(document, 'mousemove', (e) => {
+    if (!mode) return;
+    if (anyPanelOpen()) return;
+    const target = e.target;
+    if (target === hovered || !(target instanceof Element)) return;
+    if (isOwnUi(target)) { clearHover(); return; }
+    clearHover();
+    hovered = target;
+    hovered.setAttribute('data-pv-hover', '');
+  }, true);
 
-  // Close the panels when clicking outside of them (the CSS panel reverts
-  // its live edits)
-  document.addEventListener(
-    'mousedown',
-    (e) => {
-      if (panel && panel.style.display !== 'none' && !panel.contains(e.target)) closePanel();
-      if (cssPanel && cssPanel.style.display !== 'none' && !cssPanel.contains(e.target))
-        closeCssPanel();
-    },
-    true
-  );
+  on(document, 'mousedown', (e) => {
+    if (panel && panel.style.display !== 'none' && !panel.contains(e.target)) closePanel();
+    if (cssPanel && cssPanel.style.display !== 'none' && !cssPanel.contains(e.target))
+      closeCssPanel();
+  }, true);
 
-  document.addEventListener(
-    'click',
-    (e) => {
-      if (!mode) return;
-      // Let clicks on FrontPeek's own UI (toolbar, popover, panels) through to
-      // their own handlers — never inspect them or swallow the click.
-      if (isOwnUi(e.target)) return;
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
+  on(document, 'click', (e) => {
+    if (!mode) return;
+    if (isOwnUi(e.target)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
 
-      const debug = { target: describeEl(e.target), walk: [] };
-      let source = null;
-      try {
-        source = findSource(e.target, debug);
-      } catch (err) {
-        debug.error = String((err && err.stack) || err);
-      }
-      if (!source) {
-        debug.reactDetected = reactDetected();
-        debug.nextData = !!window.__next_f;
-        debug.pageErrors = pageErrors.slice();
-      }
+    const debug = { target: describeEl(e.target), walk: [] };
+    let source = null;
+    try {
+      source = findSource(e.target, debug);
+    } catch (err) {
+      debug.error = String((err && err.stack) || err);
+    }
+    if (!source) {
+      debug.reactDetected = reactDetected();
+      debug.nextData = !!window.__next_f;
+      debug.pageErrors = pageErrors.slice();
+    }
 
-      if (mode === 'edit') {
-        window.parent.postMessage({ type: 'pv-open-source', source: source, debug: debug }, '*');
-        // the action is done — let the toolbar deselect the tool
-        window.parent.postMessage({ type: 'pv-exit-inspect' }, '*');
-      } else if (mode === 'css') {
-        openCssPanel(e.target, source);
-      } else {
-        openPanel(e.target, source);
-      }
-    },
-    true
-  );
-
-  // Esc deselects the active tool; with the prompt panel open, the first Esc
-  // only closes the panel.
-  document.addEventListener(
-    'keydown',
-    (e) => {
-      if (e.key !== 'Escape' || !mode) return;
-      if (panel && panel.style.display !== 'none') {
-        closePanel();
-        return;
-      }
-      if (cssPanel && cssPanel.style.display !== 'none') {
-        closeCssPanel();
-        return;
-      }
-      setMode(null);
+    if (mode === 'edit') {
+      window.parent.postMessage({ type: 'pv-open-source', source: source, debug: debug }, '*');
       window.parent.postMessage({ type: 'pv-exit-inspect' }, '*');
-    },
-    true
-  );
+    } else if (mode === 'css') {
+      openCssPanel(e.target, source);
+    } else {
+      openPanel(e.target, source);
+    }
+  }, true);
+
+  on(document, 'keydown', (e) => {
+    if (e.key !== 'Escape' || !mode) return;
+    if (panel && panel.style.display !== 'none') {
+      closePanel();
+      return;
+    }
+    if (cssPanel && cssPanel.style.display !== 'none') {
+      closeCssPanel();
+      return;
+    }
+    setMode(null);
+    window.parent.postMessage({ type: 'pv-exit-inspect' }, '*');
+  }, true);
 
   // -------------------------------------------------------------------------
   // AI-mode floating panel
   // -------------------------------------------------------------------------
 
-  const TA_MAX = 100; // 5 lines of 20px
+  const TA_MAX = 100;
 
   function ensurePanel() {
     if (panel) return;
@@ -310,7 +290,6 @@
         e.preventDefault();
         send();
       }
-      // Shift+Enter: native behavior (line break)
     });
 
     copyBtn.addEventListener('click', send);
@@ -347,7 +326,6 @@
     resetCopy();
     autoresize();
 
-    // position near the element, preferring below it
     panel.style.display = 'block';
     const r = target.getBoundingClientRect();
     const pw = panel.offsetWidth;
@@ -395,7 +373,6 @@
     copyLbl.textContent = 'Copying…';
   }
 
-  // "Copied!" is shown for 500ms, then the panel fades out and closes.
   let copiedTimer = null;
   let fadeTimer = null;
 
@@ -410,16 +387,12 @@
     panel.classList.add('__pv-fading');
     fadeTimer = setTimeout(() => {
       closePanel();
-      // the action is done — let the toolbar deselect the tool
       window.parent.postMessage({ type: 'pv-exit-inspect' }, '*');
-    }, 250); // matches the CSS transition
+    }, 250);
   }
 
   // -------------------------------------------------------------------------
-  // CSS-mode editor panel: tabbed per CSS category, pre-filled with the
-  // element's computed styles. Edits apply live (inline, !important so they
-  // win over the app's stylesheets); only the changed properties are sent to
-  // the extension on confirm. Esc / click-outside reverts everything.
+  // CSS-mode editor panel
   // -------------------------------------------------------------------------
 
   const CSS_SELECTS = {
@@ -439,8 +412,6 @@
     'border-style': ['none', 'solid', 'dashed', 'dotted', 'double'],
   };
 
-  // {p, t: 'text' | 'select' | 'color'} for a single-input row;
-  // {quad, props} renders four side inputs (top/right/bottom/left).
   const CSS_TABS = [
     {
       label: 'Layout',
@@ -512,17 +483,14 @@
   let cssCopyBtn = null;
   let cssCopyLbl = null;
   let cssTarget = null;
-  let cssPending = null; // context of the CSS-mode click
-  let cssOrigInline = null; // the element's style attribute before any edit
-  let cssOriginal = {}; // prop -> computed value when the panel opened
-  let cssChanges = {}; // prop -> edited value (only real deltas)
-  const cssRows = {}; // prop -> {row, input, swatch}
+  let cssPending = null;
+  let cssOrigInline = null;
+  let cssOriginal = {};
+  let cssChanges = {};
+  const cssRows = {};
   let cssCopiedTimer = null;
   let cssFadeTimer = null;
 
-  // Drag the panel by its handle; listeners live on the document so fast
-  // drags that leave the handle keep tracking. Clamped so a grabbable strip
-  // always stays inside the viewport.
   function makeDraggable(panelEl, handleEl) {
     let dragging = false;
     let dx = 0;
@@ -533,20 +501,16 @@
       const r = panelEl.getBoundingClientRect();
       dx = e.clientX - r.left;
       dy = e.clientY - r.top;
-      e.preventDefault(); // no text selection while dragging
+      e.preventDefault();
     });
-    document.addEventListener(
-      'mousemove',
-      (e) => {
-        if (!dragging) return;
-        const left = Math.min(Math.max(8 - panelEl.offsetWidth + 60, e.clientX - dx), window.innerWidth - 60);
-        const top = Math.min(Math.max(0, e.clientY - dy), window.innerHeight - 32);
-        panelEl.style.left = left + 'px';
-        panelEl.style.top = top + 'px';
-      },
-      true
-    );
-    document.addEventListener('mouseup', () => (dragging = false), true);
+    on(document, 'mousemove', (e) => {
+      if (!dragging) return;
+      const left = Math.min(Math.max(8 - panelEl.offsetWidth + 60, e.clientX - dx), window.innerWidth - 60);
+      const top = Math.min(Math.max(0, e.clientY - dy), window.innerHeight - 32);
+      panelEl.style.left = left + 'px';
+      panelEl.style.top = top + 'px';
+    }, true);
+    on(document, 'mouseup', () => (dragging = false), true);
   }
 
   function cssToHex(v) {
@@ -709,7 +673,6 @@
     footer.appendChild(actions);
     cssPanel.appendChild(footer);
 
-    // keep typing in the inputs from triggering the app's own hotkeys
     cssPanel.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape') e.stopPropagation();
     });
@@ -750,8 +713,6 @@
     cssCopyLbl.textContent = 'Copy Prompt';
     updateCssFooter();
 
-    // position near the element: below, above, beside — overlap only as a
-    // last resort (the panel stays draggable by its header either way)
     cssPanel.style.display = 'block';
     const rect = target.getBoundingClientRect();
     const pw = cssPanel.offsetWidth;
@@ -771,20 +732,12 @@
 
   function revertCssEdits() {
     if (!cssTarget) return;
-    // Clear the CSSOM declaration and force the attribute to serialize
-    // (getAttribute) before removing it: edits went in via style.setProperty,
-    // which leaves the inline style "dirty" in Chromium — without the forced
-    // sync, a later style flush re-creates a stray style="" attribute after
-    // removeAttribute.
     cssTarget.style.cssText = '';
     void cssTarget.getAttribute('style');
     if (cssOrigInline == null) cssTarget.removeAttribute('style');
     else cssTarget.setAttribute('style', cssOrigInline);
   }
 
-  // Always reverts the live edits: on confirm the prompt carries the deltas
-  // and the AI applies them for real (leaving !important inline styles behind
-  // would mask the actual change after hot reload).
   function closeCssPanel() {
     clearCssTimers();
     if (cssPanel) {
@@ -874,9 +827,8 @@
     cssPanel.classList.add('__pv-fading');
     cssFadeTimer = setTimeout(() => {
       closeCssPanel();
-      // the action is done — let the toolbar deselect the tool
       window.parent.postMessage({ type: 'pv-exit-inspect' }, '*');
-    }, 250); // matches the CSS transition
+    }, 250);
   }
 
   // -------------------------------------------------------------------------
@@ -884,15 +836,7 @@
   // -------------------------------------------------------------------------
 
   const PROMPT_ATTRS = [
-    'alt',
-    'href',
-    'aria-label',
-    'data-testid',
-    'placeholder',
-    'type',
-    'name',
-    'role',
-    'title',
+    'alt', 'href', 'aria-label', 'data-testid', 'placeholder', 'type', 'name', 'role', 'title',
   ];
 
   function describeForPrompt(el) {
@@ -955,9 +899,6 @@
   // Source location via React fiber
   // -------------------------------------------------------------------------
 
-  // Looks for the fiber key on the element (see fiberKeyOf) and, if missing
-  // (nodes created via dangerouslySetInnerHTML, third-party widgets etc.),
-  // walks up the ancestors until it finds a React-managed node.
   function getFiber(el, debug) {
     let node = el;
     let hops = 0;
@@ -979,11 +920,6 @@
   function stackToString(s) {
     if (!s) return null;
     if (typeof s === 'string') return s;
-    // React Flight sends server-captured stacks as structured arrays of
-    // [functionName, fileName, line, column, ...] — serialize them into a
-    // regular stack string. These carry the raw compiled URLs (e.g.
-    // webpack-internal:///(rsc)/./src/...), which the extension resolves
-    // through the dev server's source map endpoints.
     if (Array.isArray(s)) {
       const lines = [];
       for (const fr of s) {
@@ -998,7 +934,6 @@
 
   function describeNode(f) {
     if (f.tag !== undefined) {
-      // an actual fiber
       const t = f.type;
       const typeDesc =
         typeof t === 'function'
@@ -1018,7 +953,6 @@
         hasOwner: !!f._debugOwner,
       };
     }
-    // ReactComponentInfo (server component)
     return {
       kind: 'info',
       name: f.name || null,
@@ -1027,9 +961,6 @@
     };
   }
 
-  // Number of resolvable frames in a stack string ("hasStack: true" alone is
-  // misleading — fake RSC stacks and empty structured arrays produce stacks
-  // with no usable frames).
   function frameCount(s) {
     if (!s) return 0;
     let n = 0;
@@ -1040,9 +971,6 @@
   }
 
   function nodeStack(f) {
-    // RSC info: prefer the raw structured `stack` over `debugStack` — the
-    // latter is a lazily materialized fake Error that can come out frame-less
-    // (React builds it from the same array, but only when initialized).
     if (f.tag === undefined) {
       return (
         stackToString(f.stack) ||
@@ -1050,7 +978,6 @@
         stackToString(f._debugStack)
       );
     }
-    // fiber: _debugStack (an Error in React 19, a string in some builds)
     return stackToString(f._debugStack) || stackToString(f.debugStack);
   }
 
@@ -1062,9 +989,6 @@
     const fiber = getFiber(el, debug);
     if (!fiber) return null;
 
-    // Name of the component that owns the element. Either a fiber (client
-    // component, type is a function/class) or a ReactComponentInfo (server
-    // component, only has .name).
     let componentName = null;
     let f = fiber;
     let guard = 0;
@@ -1080,31 +1004,15 @@
       f = nodeOwner(f);
     }
 
-    // Location: _debugSource (React <= 18) gives file/line directly;
-    // _debugStack (React 19) is a stack of compiled frames the extension
-    // resolves via source maps. The clicked element's stack may point inside
-    // a library (e.g. next/image's <img>), so collect the stacks of the
-    // ENTIRE owner chain — the extension tries them one by one until one
-    // resolves to a project file. _debugInfo carries info about the Server
-    // Components traversed.
     const stacks = [];
     const seen = {};
     function addStack(s) {
       if (!s) return;
-      // Dedup on the full string. A prefix is not enough: fake RSC stacks all
-      // open with the same "Error: react-stack-top-frame / at fakeJSXCallSite
-      // (...react-server-dom-webpack-client...)" lines (>200 chars) and only
-      // differ in the owner frames after them.
       if (seen[s]) return;
       seen[s] = true;
       stacks.push(s);
     }
 
-    // Names of the components along the owner chain, nearest first. When no
-    // stack resolves to a project file (e.g. Next sends empty owner stacks),
-    // the extension falls back to locating a component definition by name —
-    // node_modules components simply won't be found in the workspace and the
-    // search moves on to the next name (e.g. LinkComponent -> LandingPage).
     const ownerNames = [];
     function addOwnerName(n) {
       if (n && ownerNames.indexOf(n) < 0 && ownerNames.length < 5) ownerNames.push(n);
@@ -1147,8 +1055,7 @@
   }
 
   // -------------------------------------------------------------------------
-  // Route reporting — the webview iframe is cross-origin, so the toolbar's
-  // address bar can only learn the current route from in-page messages.
+  // Route reporting
   // -------------------------------------------------------------------------
 
   let lastRoute = null;
@@ -1161,19 +1068,19 @@
     } catch (_) {}
   }
 
-  // Client-side navigations (Next.js router) go through the History API.
+  const patchedHistory = {};
   for (const method of ['pushState', 'replaceState']) {
     const orig = history[method];
+    patchedHistory[method] = orig;
     history[method] = function () {
       const ret = orig.apply(this, arguments);
       reportRoute();
       return ret;
     };
   }
-  window.addEventListener('popstate', reportRoute);
-  window.addEventListener('hashchange', reportRoute);
+  on(window, 'popstate', reportRoute);
+  on(window, 'hashchange', reportRoute);
 
-  // Tell the webview the page loaded (to resync the inspect mode)
   function announce() {
     try {
       window.parent.postMessage({ type: 'pv-ready' }, '*');
@@ -1181,8 +1088,31 @@
     reportRoute();
   }
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', announce);
+    on(document, 'DOMContentLoaded', announce);
   } else {
     announce();
   }
-})();
+
+  // -------------------------------------------------------------------------
+  // Teardown
+  // -------------------------------------------------------------------------
+
+  function destroy() {
+    setMode(null);
+    clearPanelTimers();
+    clearCssTimers();
+    teardownListeners.forEach((l) => l[0].removeEventListener(l[1], l[2], l[3]));
+    teardownListeners = [];
+    // restore the History methods we patched
+    for (const method of ['pushState', 'replaceState']) {
+      if (patchedHistory[method]) history[method] = patchedHistory[method];
+    }
+    [style, panel, cssPanel].forEach((el) => {
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+    });
+    panel = cssPanel = null;
+    window.__PV_INSTALLED__ = false;
+  }
+
+  return { destroy: destroy };
+}
