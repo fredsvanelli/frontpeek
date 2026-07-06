@@ -146,6 +146,18 @@
     );
   }
 
+  // FrontPeek's own overlay UI — the injected toolbar (media/toolbar.js), its
+  // settings popover, and the inspector's AI/CSS panels — must never be
+  // inspectable. Hovering must not outline it and clicking must pass straight
+  // through to its own handlers, so the toolbar stays usable in every mode.
+  function isOwnUi(el) {
+    return !!(
+      el &&
+      el.closest &&
+      el.closest('#__pv-toolbar, #__pv-pop, #__pv-panel, #__pv-css-panel')
+    );
+  }
+
   window.addEventListener('message', (e) => {
     const msg = e.data;
     if (!msg || !msg.type) return;
@@ -179,6 +191,7 @@
       if (anyPanelOpen()) return;
       const target = e.target;
       if (target === hovered || !(target instanceof Element)) return;
+      if (isOwnUi(target)) { clearHover(); return; }
       clearHover();
       hovered = target;
       hovered.setAttribute('data-pv-hover', '');
@@ -202,8 +215,9 @@
     'click',
     (e) => {
       if (!mode) return;
-      if (panel && panel.contains(e.target)) return; // panel interactions
-      if (cssPanel && cssPanel.contains(e.target)) return;
+      // Let clicks on FrontPeek's own UI (toolbar, popover, panels) through to
+      // their own handlers — never inspect them or swallow the click.
+      if (isOwnUi(e.target)) return;
       e.preventDefault();
       e.stopPropagation();
       e.stopImmediatePropagation();

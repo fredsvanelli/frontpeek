@@ -4,6 +4,7 @@ const https = require('https');
 const net = require('net');
 const path = require('path');
 const fs = require('fs');
+const cp = require('child_process');
 
 // Browser-facing host for the proxy. We use `localhost` (not `127.0.0.1`) so
 // that cookies scoped to the `localhost` host — which browsers key by host and
@@ -81,6 +82,118 @@ function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand('frontPeek.open', () => openPreview(context))
   );
+
+  // Real-origin mode: start the bridge and offer the one-line dev snippet that
+  // loads the FrontPeek toolbar into the app running in the user's browser.
+  startBridge(context).catch((err) => log(`Bridge failed to start: ${err.message}`));
+  context.subscriptions.push(
+    vscode.commands.registerCommand('frontPeek.copySnippet', () => copyInjectionRecipe(context))
+  );
+}
+
+// Presents the per-framework injection recipes, pre-selecting the one detected
+// in the workspace, then copies the chosen snippet to the clipboard.
+async function copyInjectionRecipe(context) {
+  await startBridge(context);
+  const recipes = frameworkRecipes(bridgeOrigin());
+  const detected = detectFramework();
+
+  const items = recipes.map((r) => ({
+    label: r.id === detected ? `$(check) ${r.label}` : r.label,
+    description: r.id === detected ? 'detected in this workspace' : '',
+    detail: r.where,
+    recipe: r,
+  }));
+  // Float the detected framework to the top.
+  items.sort((a, b) => (b.recipe.id === detected ? 1 : 0) - (a.recipe.id === detected ? 1 : 0));
+
+  const pick = await vscode.window.showQuickPick(items, {
+    title: 'FrontPeek — copy the injection snippet for your framework',
+    placeHolder: 'Where should the FrontPeek toolbar be loaded from?',
+    ignoreFocusOut: true,
+  });
+  if (!pick) return;
+
+  await vscode.env.clipboard.writeText(pick.recipe.body);
+  log(`Injection recipe (${pick.recipe.label}):\n${pick.recipe.body}`);
+  const choice = await vscode.window.showInformationMessage(
+    `FrontPeek: ${pick.recipe.label} snippet copied. ${pick.recipe.where}. Add it (dev only), then open your app in the browser at its real URL.`,
+    'Show in Output'
+  );
+  if (choice === 'Show in Output') output.show(true);
+}
+
+// Reads the workspace package.json to guess the framework so the QuickPick can
+// pre-select it. Best-effort — a wrong guess just means one extra keystroke.
+function detectFramework() {
+  try {
+    const folders = vscode.workspace.workspaceFolders || [];
+    for (const f of folders) {
+      const pkgPath = path.join(f.uri.fsPath, 'package.json');
+      if (!fs.existsSync(pkgPath)) continue;
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+      const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+      if (deps.next) return 'next';
+      if (deps.vite) return 'vite';
+      if (deps['react-scripts'] || deps.react) return 'react';
+    }
+  } catch {}
+  return null;
+}
+
+// Copy-paste-ready, dev-only injection recipes per framework. Each embeds the
+// live bridge origin so the port is always correct.
+function frameworkRecipes(origin) {
+  const src = `${origin}/frontpeek.js`;
+  return [
+    {
+      id: 'next',
+      label: 'Next.js (App Router)',
+      where: 'in app/layout.tsx, inside <body>',
+      body:
+        `import Script from 'next/script';\n\n` +
+        `// …inside the <body> of your root layout:\n` +
+        `{process.env.NODE_ENV !== 'production' && (\n` +
+        `  <Script src="${src}" strategy="afterInteractive" />\n` +
+        `)}`,
+    },
+    {
+      id: 'vite',
+      label: 'Vite',
+      where: 'as a dev-only plugin in vite.config.js',
+      body:
+        `// vite.config.js — injects FrontPeek only when running the dev server\n` +
+        `export const frontpeek = {\n` +
+        `  name: 'frontpeek',\n` +
+        `  apply: 'serve', // dev only, never in the production build\n` +
+        `  transformIndexHtml: (html) =>\n` +
+        `    html.replace(\n` +
+        `      '</body>',\n` +
+        `      '<script src="${src}" async></script></body>'\n` +
+        `    ),\n` +
+        `};\n` +
+        `// then add \`frontpeek\` to the \`plugins: [...]\` array in your config.`,
+    },
+    {
+      id: 'react',
+      label: 'React (CRA / webpack / other)',
+      where: 'in your entry file (e.g. src/index.js/.tsx)',
+      body:
+        `// dev-only: load the FrontPeek toolbar in development\n` +
+        `if (process.env.NODE_ENV === 'development') {\n` +
+        `  const s = document.createElement('script');\n` +
+        `  s.src = '${src}';\n` +
+        `  s.async = true;\n` +
+        `  document.body.appendChild(s);\n` +
+        `}`,
+    },
+    {
+      id: 'html',
+      label: 'Plain HTML <script>',
+      where: 'in your dev HTML (before </body>)',
+      body: `<script src="${src}" async></script>`,
+    },
+  ];
 }
 
 function handleWebviewMessage(context, msg) {
@@ -664,6 +777,32 @@ async function openSource(source) {
     preview: false,
     selection: new vscode.Range(pos, pos),
   });
+  focusEditorWindow();
+}
+
+// In real-origin mode the click happens in the browser, so the editor window
+// stays in the background (often minimized) even though the file just opened.
+// Raise it to the foreground. `vscode` has no API to un-minimize its own OS
+// window, so this shells out per-platform. macOS uses `open` on the running
+// editor's app bundle — editor-agnostic (Code/Insiders/Cursor/VSCodium), and
+// unlike AppleScript `activate` it needs no Automation (TCC) permission prompt.
+function focusEditorWindow() {
+  try {
+    if (process.platform === 'darwin') {
+      const bundle = (process.execPath.match(/^(.*?\.app)(\/|$)/) || [])[1];
+      if (bundle) cp.execFile('open', [bundle], () => {});
+      else cp.execFile('open', ['-a', vscode.env.appName], () => {});
+    } else if (process.platform === 'linux') {
+      // Best-effort; only works if wmctrl is installed. Silently ignored if not.
+      cp.execFile('wmctrl', ['-a', vscode.env.appName], () => {});
+    }
+    // Windows blocks cross-process foreground stealing without a prompt-y hack,
+    // so we skip the OS-level raise there and rely on the focus command below.
+  } catch (err) {
+    log(`focusEditorWindow failed: ${err.message}`);
+  }
+  // Also move focus to the editor group (raises it when already foreground).
+  vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
 }
 
 // ---------------------------------------------------------------------------
@@ -688,6 +827,7 @@ async function handleAiPrompt(payload) {
   log('Structured prompt copied to clipboard');
 
   if (previewView) previewView.webview.postMessage({ type: 'pv-ai-copied', ok: true });
+  bridgeSend({ type: 'pv-ai-copied', ok: true });
 }
 
 function buildAiPrompt(text, loc, source, element, url) {
@@ -755,6 +895,7 @@ async function handleCssPrompt(payload) {
   log('CSS prompt copied to clipboard');
 
   if (previewView) previewView.webview.postMessage({ type: 'pv-css-copied', ok: true });
+  bridgeSend({ type: 'pv-css-copied', ok: true });
 }
 
 function buildCssPrompt(changes, loc, source, element, url) {
@@ -1475,6 +1616,181 @@ function resolveFile(fileName) {
 }
 
 // ---------------------------------------------------------------------------
+// Bridge (real-origin mode)
+// ---------------------------------------------------------------------------
+// The alternative to the iframe/proxy: instead of hosting the app inside a
+// VS Code webview (which forces a fake origin and all the tunnel/cookie work),
+// the app runs in the user's real browser at its real URL. A one-line dev-only
+// snippet loads media/toolbar.js + media/inspector.js from this bridge; the
+// toolbar renders a floating footer in the page and talks back here over a
+// plain HTTP channel — SSE for extension->page, fetch POST for page->extension.
+// No iframe, no proxy, no origin rewriting: OAuth/SSO and cookies work natively
+// because the browser is at the real origin the identity provider whitelisted.
+
+const BRIDGE_DEFAULT_PORT = 57420;
+let bridgeServer = null;
+let bridgePort = null;
+const sseClients = new Set();
+
+// Only loopback web origins may drive the bridge. With CORS `*` the browser
+// will deliver a simple POST from any site, so this server-side Origin check is
+// the real guard against a random page you visit poking at your source files.
+function isLoopbackOrigin(origin) {
+  try {
+    const u = new URL(origin);
+    return (
+      (u.protocol === 'http:' || u.protocol === 'https:') &&
+      (u.hostname === 'localhost' ||
+        u.hostname === '127.0.0.1' ||
+        u.hostname === '[::1]' ||
+        u.hostname === '::1')
+    );
+  } catch {
+    return false;
+  }
+}
+
+function bridgeSend(msg) {
+  const line = `data: ${JSON.stringify(msg)}\n\n`;
+  for (const res of sseClients) {
+    try {
+      res.write(line);
+    } catch {
+      sseClients.delete(res);
+    }
+  }
+}
+
+async function handleBridgeMessage(msg) {
+  if (!msg || !msg.type) return;
+  // The page reports the origin it is actually running at (its real dev URL) —
+  // the source resolver fetches chunks/source maps straight from there. No
+  // proxy is involved, so currentProxyPort stays null and the proxy-origin
+  // remap in parseStackFrames is a no-op.
+  if (msg.origin && isLoopbackOrigin(msg.origin)) {
+    currentTargetOrigin = new URL(msg.origin).origin;
+    currentProxyPort = null;
+  }
+  if (msg.type === 'open-source') {
+    if (msg.debug) log(`Inspector diagnostics: ${JSON.stringify(msg.debug)}`);
+    await openSource(msg.source);
+  } else if (msg.type === 'ai-prompt') {
+    if (msg.debug) log(`Inspector diagnostics: ${JSON.stringify(msg.debug)}`);
+    await handleAiPrompt(msg.payload);
+  } else if (msg.type === 'css-prompt') {
+    if (msg.debug) log(`Inspector diagnostics: ${JSON.stringify(msg.debug)}`);
+    await handleCssPrompt(msg.payload);
+  }
+}
+
+function startBridge(context) {
+  if (bridgeServer) return Promise.resolve(bridgePort);
+
+  const toolbarSrc = fs.readFileSync(
+    path.join(context.extensionPath, 'media', 'toolbar.js'),
+    'utf8'
+  );
+  const inspectorSrc = fs.readFileSync(
+    path.join(context.extensionPath, 'media', 'inspector.js'),
+    'utf8'
+  );
+
+  const cors = (res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'content-type');
+  };
+
+  const server = http.createServer((req, res) => {
+    const url = req.url.split('?')[0];
+    cors(res);
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    if (url === '/frontpeek.js') {
+      // The bundle is self-configuring: it carries the bridge origin so the
+      // page can reach us back regardless of which loopback port we landed on.
+      const config = `window.__FRONTPEEK_BRIDGE__=${JSON.stringify(bridgeOrigin())};\n`;
+      res.writeHead(200, {
+        'content-type': 'application/javascript; charset=utf-8',
+        'cache-control': 'no-store',
+      });
+      res.end(config + toolbarSrc + '\n' + inspectorSrc);
+      return;
+    }
+
+    if (url === '/events') {
+      res.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-store',
+        connection: 'keep-alive',
+      });
+      res.write('retry: 2000\n\n');
+      sseClients.add(res);
+      log(`Bridge: page connected (${sseClients.size} open)`);
+      req.on('close', () => {
+        sseClients.delete(res);
+      });
+      return;
+    }
+
+    if (url === '/msg' && req.method === 'POST') {
+      if (!isLoopbackOrigin(req.headers.origin || '')) {
+        res.writeHead(403);
+        res.end('forbidden');
+        return;
+      }
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        let msg = null;
+        try {
+          msg = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        } catch {
+          res.writeHead(400);
+          res.end('bad json');
+          return;
+        }
+        handleBridgeMessage(msg).catch((err) => {
+          log(`ERROR in bridge message: ${err.stack || err.message}`);
+        });
+        res.writeHead(204);
+        res.end();
+      });
+      return;
+    }
+
+    res.writeHead(404);
+    res.end('FrontPeek bridge');
+  });
+
+  return new Promise((resolve) => {
+    const onListen = () => {
+      bridgeServer = server;
+      bridgePort = server.address().port;
+      log(`Bridge listening on ${bridgeOrigin()}`);
+      resolve(bridgePort);
+    };
+    server.once('error', () => {
+      // Default port busy — fall back to a random one (the snippet always
+      // reflects the live port, so this is transparent).
+      server.listen(0, '127.0.0.1', onListen);
+    });
+    server.listen(BRIDGE_DEFAULT_PORT, '127.0.0.1', onListen);
+  });
+}
+
+function bridgeOrigin() {
+  return `http://localhost:${bridgePort || BRIDGE_DEFAULT_PORT}`;
+}
+
+function injectionSnippet() {
+  return `<script src="${bridgeOrigin()}/frontpeek.js" async></script>`;
+}
+
+// ---------------------------------------------------------------------------
 // Webview
 // ---------------------------------------------------------------------------
 
@@ -1833,6 +2149,13 @@ function getRedirectHtml() {
 
 function deactivate() {
   if (proxyServer) proxyServer.close();
+  if (bridgeServer) bridgeServer.close();
+  for (const res of sseClients) {
+    try {
+      res.end();
+    } catch {}
+  }
+  sseClients.clear();
 }
 
 module.exports = { activate, deactivate };

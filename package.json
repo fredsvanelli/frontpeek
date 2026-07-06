@@ -2,7 +2,7 @@
   "name": "frontpeek",
   "displayName": "FrontPeek",
   "description": "POC: React/Next.js app preview with a component inspector (click to open the source code)",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "fred",
   "license": "MIT",
   "repository": {
@@ -34,6 +34,10 @@
       {
         "command": "frontPeek.open",
         "title": "FrontPeek: Open Preview"
+      },
+      {
+        "command": "frontPeek.copySnippet",
+        "title": "FrontPeek: Copy Injection Snippet (real-origin mode)"
       }
     ],
     "viewsContainers": {

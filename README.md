@@ -8,6 +8,29 @@ clipboard.
 Works with **Next.js** and with **plain React apps** (Vite, CRA,
 webpack-dev-server) on **React 16 through 19**.
 
+## Real-origin mode (v0.3b, recommended)
+
+Instead of hosting your app inside a webview iframe (which forces a fake origin
+and breaks OAuth/SSO — see below), FrontPeek can inject its inspector directly
+into your app running in your **own browser, at its real URL**. Because the page
+is at the origin your identity provider already whitelisted, **cookies, CORS and
+OAuth/SSO all work natively, with no proxy, tunnel or configuration**.
+
+1. Run **FrontPeek: Copy Injection Snippet** from the command palette. Pick your
+   framework (it pre-selects the one it detects) and it copies a **dev-only**
+   snippet — a Next.js `<Script>`, a Vite dev plugin, a React entry-file guard,
+   or a plain `<script>` — with the local bridge port already filled in.
+2. Paste it into your app (development only) and open the app in your browser at
+   its real URL.
+3. A floating **toolbar** appears docked to the page. **Code** opens the clicked
+   element's source in VS Code (and raises the window), **Edit** and **Prompt**
+   copy a structured change prompt to your clipboard — same inspector as the
+   webview preview. The cog menu lets you reposition, hide, or close the toolbar
+   (the position persists across reloads).
+
+See `EXPLORATION.md` for the architecture and trade-offs. The webview preview
+below still works and remains the fallback when you can't add the snippet.
+
 ## How to run
 
 1. Open this folder in VS Code and press **F5** (Run Extension). An
