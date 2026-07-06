@@ -102,6 +102,12 @@ function handleWebviewMessage(context, msg) {
       log(`ERROR in handleAiPrompt: ${err.stack || err.message}`);
       vscode.window.showErrorMessage(`FrontPeek: ${err.message}`);
     });
+  } else if (msg.type === 'css-prompt') {
+    if (msg.debug) log(`Inspector diagnostics: ${JSON.stringify(msg.debug)}`);
+    handleCssPrompt(msg.payload).catch((err) => {
+      log(`ERROR in handleCssPrompt: ${err.stack || err.message}`);
+      vscode.window.showErrorMessage(`FrontPeek: ${err.message}`);
+    });
   }
 }
 
@@ -351,7 +357,7 @@ function handleTunnel(req, res, targetUrl) {
             loc.origin === targetUrl.origin
               ? loc.pathname + loc.search + loc.hash
               : `/__pv/tunnel?u=${encodeURIComponent(loc.href)}`;
-        } catch {}
+        } catch { }
       }
       res.writeHead(upstream.statusCode, outHeaders);
       upstream.pipe(res);
@@ -392,12 +398,12 @@ function startProxy(context, targetUrl) {
 
     const server = http.createServer((req, res) => {
       if (req.url === '/__pv/inspector.js') {
-        res.writeHead(200, { 'content-type': 'application/javascript' });
+        res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });
         res.end(inspectorSrc);
         return;
       }
       if (req.url === '/__pv/tunnel.js') {
-        res.writeHead(200, { 'content-type': 'application/javascript' });
+        res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });
         res.end(tunnelSrc);
         return;
       }
@@ -493,7 +499,7 @@ function startProxy(context, targetUrl) {
         log(`Configured proxy port ${desiredPort} is in use; falling back to a random port`);
         vscode.window.showWarningMessage(
           `FrontPeek: proxy port ${desiredPort} is in use — using a random port instead. ` +
-            `Logins that rely on a fixed, whitelisted origin will not work until that port is free.`
+          `Logins that rely on a fixed, whitelisted origin will not work until that port is free.`
         );
         server.listen(0, '127.0.0.1');
         return;
@@ -568,7 +574,68 @@ async function resolveSourceLocation(source) {
     }
   }
 
+  // Path 3: nothing mapped back to the workspace (e.g. Next sends empty owner
+  // stacks for the element). Locate the definition of an owner-chain
+  // component by name, nearest owner first — library components (next/link's
+  // LinkComponent) aren't defined in the workspace, so the search naturally
+  // moves on to the user's own component (e.g. LandingPage).
+  if (!uri && Array.isArray(source.ownerNames)) {
+    for (const name of source.ownerNames) {
+      if (!/^[A-Z][A-Za-z0-9_]*$/.test(name)) continue;
+      const found = await findComponentDefinition(name);
+      if (found) {
+        log(`  name fallback: "${name}" defined at ${found.uri.fsPath}:${found.lineNumber}`);
+        uri = found.uri;
+        lineNumber = found.lineNumber;
+        columnNumber = found.columnNumber;
+        break;
+      }
+      log(`  name fallback: no workspace definition for "${name}"`);
+    }
+  }
+
   return uri ? { uri, lineNumber, columnNumber } : null;
+}
+
+// Scans workspace sources for the definition of a component (function/const/
+// class declaration). Files named after the component are checked first, so
+// the common case short-circuits after a handful of reads.
+async function findComponentDefinition(name) {
+  const files = await vscode.workspace.findFiles(
+    '**/*.{tsx,jsx,ts,js,mjs,cjs}',
+    '**/{node_modules,.next,.git,dist,build,out,coverage}/**',
+    3000
+  );
+  const re = new RegExp(
+    '(?:^|\\s)(?:export\\s+)?(?:default\\s+)?(?:async\\s+)?' +
+    `(?:function\\s+${name}\\s*[(<]|(?:const|let|var)\\s+${name}\\s*[:=]|class\\s+${name}\\b)`,
+    'm'
+  );
+
+  const kebab = name.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
+  const nameScore = (uri) => {
+    const base = path.basename(uri.fsPath).replace(/\.[^.]+$/, '');
+    if (base === name) return 3;
+    const lower = base.toLowerCase().replace(/[-_.]/g, '');
+    if (lower === name.toLowerCase()) return 2;
+    if (base.toLowerCase() === kebab) return 2;
+    if (lower.includes(name.toLowerCase())) return 1;
+    return 0;
+  };
+  files.sort((a, b) => nameScore(b) - nameScore(a) || a.fsPath.length - b.fsPath.length);
+
+  let reads = 0;
+  for (const f of files) {
+    if (reads++ > 1500) break;
+    const text = readFileSafe(f.fsPath);
+    if (!text || text.length > 1024 * 1024) continue;
+    const m = re.exec(text);
+    if (!m) continue;
+    const idx = m.index + m[0].indexOf(name);
+    const lineNumber = text.slice(0, idx).split('\n').length;
+    return { uri: f, lineNumber, columnNumber: 1 };
+  }
+  return null;
 }
 
 async function openSource(source) {
@@ -630,7 +697,12 @@ function buildAiPrompt(text, loc, source, element, url) {
   lines.push(
     '- Task: apply the change described above to the exact JSX element below (confirm the target via selector, classes and text; if the line shifted, find the equivalent JSX in the same file)'
   );
+  appendTargetContext(lines, loc, source, element, url);
+  return lines.join('\n');
+}
 
+// Shared prompt tail: everything the AI needs to locate the exact element.
+function appendTargetContext(lines, loc, source, element, url) {
   if (loc) {
     const relPath = vscode.workspace.asRelativePath(loc.uri, false);
     lines.push(`- File path: ${relPath}:${loc.lineNumber}:${loc.columnNumber}`);
@@ -648,7 +720,7 @@ function buildAiPrompt(text, loc, source, element, url) {
       : url;
     lines.push(`- Route: ${u.pathname}${u.search}`);
     lines.push(`- URL: ${devUrl}`);
-  } catch {}
+  } catch { }
 
   if (element) {
     if (element.tag) lines.push(`- Element: <${element.tag}>`);
@@ -656,7 +728,49 @@ function buildAiPrompt(text, loc, source, element, url) {
     if (element.classes) lines.push(`- Classes: ${element.classes}`);
     if (element.text) lines.push(`- Text: "${element.text}"`);
   }
+}
 
+// ---------------------------------------------------------------------------
+// CSS mode: the inspector's style editor sends only the edited properties;
+// build a prompt carrying the computed -> desired deltas and copy it.
+// ---------------------------------------------------------------------------
+
+async function handleCssPrompt(payload) {
+  const { changes, source, element, url } = payload || {};
+  if (!Array.isArray(changes) || !changes.length) return;
+
+  log(
+    `CSS prompt received for ${(element && element.selector) || 'unknown element'} (${changes.length} change${changes.length === 1 ? '' : 's'})`
+  );
+
+  let loc = null;
+  try {
+    loc = await resolveSourceLocation(source);
+  } catch (err) {
+    log(`Source resolution failed in CSS mode: ${err.message}`);
+  }
+
+  const prompt = buildCssPrompt(changes, loc, source, element, url);
+  await vscode.env.clipboard.writeText(prompt);
+  log('CSS prompt copied to clipboard');
+
+  if (previewView) previewView.webview.postMessage({ type: 'pv-css-copied', ok: true });
+}
+
+function buildCssPrompt(changes, loc, source, element, url) {
+  const lines = [];
+  lines.push('Apply the following CSS changes to the JSX element described below.');
+  lines.push('');
+  lines.push('CSS changes (current computed value -> desired value):');
+  for (const c of changes) {
+    if (!c || !c.prop) continue;
+    lines.push(`- ${c.prop}: ${c.from || 'unset'} -> ${c.to}`);
+  }
+  lines.push('');
+  lines.push(
+    '- Task: implement the CSS changes above on the exact JSX element below (confirm the target via selector, classes and text; if the line shifted, find the equivalent JSX in the same file). Use the styling system the element already uses (Tailwind classes, CSS Modules, styled-components, plain CSS, …) and follow the file conventions — do not add inline styles unless the element already uses them. The desired values were previewed live in the browser, so treat them as the exact intended result (equivalent utility classes or design tokens are fine).'
+  );
+  appendTargetContext(lines, loc, source, element, url);
   return lines.join('\n');
 }
 
@@ -829,7 +943,7 @@ function parseStackFrames(stackText) {
       if (decoded !== file) variants.push(decoded);
       try {
         variants.push(decodeSafe(new URL(file).pathname));
-      } catch {}
+      } catch { }
     }
     for (const fv of variants) {
       frames.push({
@@ -961,7 +1075,7 @@ async function tryWebpackInternalFrame(frame, tried, cache) {
       else if (res.ok) {
         try {
           entry.map = JSON.parse(await res.text());
-        } catch {}
+        } catch { }
       }
     } catch (err) {
       log(`  webpack-internal: GET source map failed: ${err.message}`);
@@ -1058,9 +1172,9 @@ async function loadRemoteChunk(url, cache) {
       else if (res.ok) {
         try {
           entry.map = JSON.parse(await res.text());
-        } catch {}
+        } catch { }
       }
-    } catch {}
+    } catch { }
   }
 
   if (!entry.map && entry.text) {
@@ -1119,7 +1233,7 @@ function resolveAgainstBase(source, base) {
       return decodeSafe(u.pathname);
     }
     if (path.isAbsolute(base)) return path.resolve(path.dirname(base), source);
-  } catch {}
+  } catch { }
   return null;
 }
 
@@ -1177,7 +1291,7 @@ function loadSourceMap(absJsPath) {
   let cacheKey = absJsPath;
   try {
     cacheKey += ':' + fs.statSync(absJsPath).mtimeMs;
-  } catch {}
+  } catch { }
   if (sourceMapCache.has(cacheKey)) return sourceMapCache.get(cacheKey);
 
   let map = null;
@@ -1411,6 +1525,14 @@ function getWebviewHtml(proxyPort, targetOrigin, initialPath) {
     #ai.active {
       background: linear-gradient(135deg, #7c3aed, #4f46e5); border-color: transparent;
     }
+    #css.active {
+      background: linear-gradient(135deg, #0ea5e9, #2563eb); border-color: transparent;
+    }
+    @media (max-width: 768px) {
+      #toolbar { gap: 4px; padding: 6px; }
+      #toolbar button { width: 30px; padding: 0; }
+      #toolbar button span { display: none; }
+    }
     #addr {
       flex: 1; min-width: 0;
       display: flex; align-items: center;
@@ -1445,9 +1567,16 @@ function getWebviewHtml(proxyPort, targetOrigin, initialPath) {
 <body>
   <iframe id="frame" src="${frameSrc}"></iframe>
   <div id="toolbar">
-    <button id="edit" title="Edit: click an element to open its source code">
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-        <path d="M12.146 1.146a2.05 2.05 0 0 1 2.9 2.9l-.83.83-2.9-2.9.83-.83zM10.61 2.68l2.9 2.9-7.79 7.79a1 1 0 0 1-.44.256l-3.1.886a.5.5 0 0 1-.618-.618l.886-3.1a1 1 0 0 1 .256-.44l7.906-7.674z"/>
+    <button id="edit" title="Find: click an element to open its source code">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M5.5 3.5 1.5 8l4 4.5M10.5 3.5l4 4.5-4 4.5"/>
+      </svg>
+      <span>Code</span>
+    </button>
+    <button id="css" title="Edit: click an element, tweak its styles live and copy the changes as a prompt">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+        <path d="M2 4h6.3M11.7 4H14M2 8h2.3M7.7 8H14M2 12h8.3M13.7 12H14"/>
+        <circle cx="10" cy="4" r="1.7"/><circle cx="6" cy="8" r="1.7"/><circle cx="12" cy="12" r="1.7"/>
       </svg>
       <span>Edit</span>
     </button>
@@ -1458,27 +1587,40 @@ function getWebviewHtml(proxyPort, targetOrigin, initialPath) {
       </svg>
       <span>Prompt</span>
     </button>
-    <button id="reload" title="Reload page">
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-        <path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z"/>
+    <button id="back" title="Go back">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M13 8H3M7 3 3 8l4 5"/>
+      </svg>
+    </button>
+    <button id="forward" title="Go forward">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 8h10M9 3l4 5-4 5"/>
       </svg>
     </button>
     <div id="addr" title="Current route — edit and press Enter to navigate">
       <span id="base" title="Click to change the dev server URL">${displayOrigin}</span><input id="base-input" spellcheck="false" autocomplete="off" /><input id="route" value="${startPath}" spellcheck="false" autocomplete="off" />
     </div>
+    <button id="reload" title="Reload page">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+        <path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z"/>
+      </svg>
+    </button>
   </div>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     const iframe = document.getElementById('frame');
     const editBtn = document.getElementById('edit');
     const aiBtn = document.getElementById('ai');
+    const cssBtn = document.getElementById('css');
     const reloadBtn = document.getElementById('reload');
+    const backBtn = document.getElementById('back');
+    const forwardBtn = document.getElementById('forward');
     const routeInput = document.getElementById('route');
     const baseSpan = document.getElementById('base');
     const baseInput = document.getElementById('base-input');
     const baseOrigin = ${JSON.stringify(proxyOriginFor(proxyPort))};
     const displayOrigin = ${JSON.stringify(displayOrigin)};
-    let mode = null; // null | 'edit' | 'ai'
+    let mode = null; // null | 'edit' | 'ai' | 'css'
     let currentRoute = ${JSON.stringify(startPath)}; // reported by the inspector inside the iframe
 
     function sendInspectState() {
@@ -1492,11 +1634,13 @@ function getWebviewHtml(proxyPort, targetOrigin, initialPath) {
       mode = mode === m ? null : m;
       editBtn.classList.toggle('active', mode === 'edit');
       aiBtn.classList.toggle('active', mode === 'ai');
+      cssBtn.classList.toggle('active', mode === 'css');
       sendInspectState();
     }
 
     editBtn.addEventListener('click', () => applyMode('edit'));
     aiBtn.addEventListener('click', () => applyMode('ai'));
+    cssBtn.addEventListener('click', () => applyMode('css'));
 
     function setRoute(route) {
       currentRoute = route || '/';
@@ -1569,6 +1713,18 @@ function getWebviewHtml(proxyPort, targetOrigin, initialPath) {
       iframe.src = baseOrigin + currentRoute;
     });
 
+    // iframe.contentWindow.history isn't reachable directly: the proxy origin
+    // differs from this webview's, and unlike location/postMessage, history
+    // isn't on the cross-origin-accessible allowlist — it throws a
+    // SecurityError. Ask the inspector script running inside the page (same
+    // origin as the page) to do the navigation instead.
+    backBtn.addEventListener('click', () => {
+      iframe.contentWindow.postMessage({ type: 'pv-history-back' }, '*');
+    });
+    forwardBtn.addEventListener('click', () => {
+      iframe.contentWindow.postMessage({ type: 'pv-history-forward' }, '*');
+    });
+
     window.addEventListener('message', (e) => {
       const msg = e.data;
       if (!msg || !msg.type) return;
@@ -1581,10 +1737,13 @@ function getWebviewHtml(proxyPort, targetOrigin, initialPath) {
         vscode.postMessage({ type: 'open-source', source: msg.source, debug: msg.debug });
       } else if (msg.type === 'pv-ai-prompt') {
         vscode.postMessage({ type: 'ai-prompt', payload: msg.payload, debug: msg.debug });
+      } else if (msg.type === 'pv-css-prompt') {
+        vscode.postMessage({ type: 'css-prompt', payload: msg.payload, debug: msg.debug });
       } else if (msg.type === 'pv-exit-inspect') {
-        // Esc pressed inside the page — deselect the tool in the toolbar
+        // Esc pressed inside the page, or a tool's action just completed —
+        // deselect the tool in the toolbar
         if (mode) applyMode(null);
-      } else if (msg.type === 'pv-ai-copied') {
+      } else if (msg.type === 'pv-ai-copied' || msg.type === 'pv-css-copied') {
         // from the extension — forward to the inspector inside the iframe
         iframe.contentWindow.postMessage(msg, '*');
       }

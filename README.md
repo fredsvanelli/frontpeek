@@ -27,6 +27,16 @@ webpack-dev-server) on **React 16 through 19**.
      Describe the change and press Enter — a structured prompt (with file
      path, line, route, selector, etc.) is copied to the clipboard, ready to
      paste into Claude Code. Shift+Enter inserts a new line; Esc closes.
+   - **CSS** (sliders): click an element and a style editor opens, organized
+     in tabs by category (Layout, Size, Text, Colors, Border) and pre-filled
+     with the element's computed styles. Edits apply to the element **live**
+     so you can preview them; **Copy Prompt** copies a structured prompt
+     containing only the properties you changed (`computed → desired`), plus
+     the same file/route/selector context as AI mode — the AI then implements
+     the change in the project's own styling system (Tailwind, CSS Modules,
+     …). **Reset** reverts the live edits; Esc or clicking outside discards
+     and closes. If the panel covers the element, drag it away by its
+     header bar.
 
 ## How it works
 
