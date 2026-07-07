@@ -1,0 +1,31 @@
+{
+  "name": "frontpeek",
+  "displayName": "FrontPeek",
+  "description": "Companion for the @fredsvanelli/frontpeek toolbar: click an element's \"Code\" button in your running app to open its source in this editor.",
+  "version": "0.4.0",
+  "publisher": "fred",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fredsvanelli/frontpeek.git",
+    "directory": "packages/extension"
+  },
+  "engines": {
+    "vscode": "^1.105.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "frontPeek.showOutput",
+        "title": "FrontPeek: Show Output"
+      }
+    ]
+  }
+}

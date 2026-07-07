@@ -1,0 +1,39 @@
+{
+  "name": "@fredsvanelli/frontpeek",
+  "version": "0.1.0",
+  "description": "Click any element in your running React/Next app to jump to its source — or copy the component path / an AI prompt. A floating toolbar that works standalone, and opens VS Code when the companion extension is running.",
+  "type": "module",
+  "main": "./src/index.js",
+  "module": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "keywords": [
+    "react",
+    "nextjs",
+    "devtools",
+    "inspector",
+    "source",
+    "click-to-source",
+    "toolbar"
+  ],
+  "peerDependencies": {
+    "react": ">=17"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fredsvanelli/frontpeek.git",
+    "directory": "packages/frontpeek"
+  },
+  "author": "Fred Vanelli"
+}

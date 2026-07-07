@@ -1,76 +1,14 @@
 {
-  "name": "frontpeek",
-  "displayName": "FrontPeek",
-  "description": "POC: React/Next.js app preview with a component inspector (click to open the source code)",
-  "version": "0.2.0",
-  "publisher": "fred",
+  "name": "frontpeek-monorepo",
+  "private": true,
+  "version": "0.0.0",
+  "description": "FrontPeek — click any element in your running app to jump to its source. npm toolbar + companion VS Code extension.",
+  "workspaces": [
+    "packages/*"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/fredsvanelli/frontpeek.git"
-  },
-  "engines": {
-    "vscode": "^1.105.0"
-  },
-  "categories": [
-    "Other"
-  ],
-  "main": "./extension.js",
-  "activationEvents": [],
-  "contributes": {
-    "configuration": {
-      "title": "FrontPeek",
-      "properties": {
-        "frontPeek.proxyPort": {
-          "type": "number",
-          "default": 0,
-          "minimum": 0,
-          "maximum": 65535,
-          "markdownDescription": "Fixed port for the local preview proxy. `0` (default) picks a random free port each session. Set a fixed port so the preview always runs at the same origin (`http://localhost:<port>`). This is useful for apps behind an identity provider (Okta, Auth0, Cognito, …) that validates the request origin: add `http://localhost:<port>` once to the provider's **Trusted Origins** and **Redirect URIs**, and OAuth/SSO logins will complete inside the preview. If the port is already in use, the extension falls back to a random port and warns."
-        }
-      }
-    },
-    "commands": [
-      {
-        "command": "frontPeek.open",
-        "title": "FrontPeek: Open Preview"
-      }
-    ],
-    "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "frontPeekLauncher",
-          "title": "FrontPeek",
-          "icon": "media/cursor-ai.svg"
-        }
-      ],
-      "secondarySidebar": [
-        {
-          "id": "frontPeekPreview",
-          "title": "FrontPeek",
-          "icon": "media/cursor-ai.svg"
-        }
-      ]
-    },
-    "views": {
-      "frontPeekLauncher": [
-        {
-          "type": "webview",
-          "id": "frontPeek.launcher",
-          "name": "FrontPeek",
-          "icon": "media/cursor-ai.svg",
-          "contextualTitle": "FrontPeek"
-        }
-      ],
-      "frontPeekPreview": [
-        {
-          "type": "webview",
-          "id": "frontPeek.preview",
-          "name": "Preview",
-          "icon": "media/cursor-ai.svg",
-          "contextualTitle": "FrontPeek"
-        }
-      ]
-    }
   }
 }
