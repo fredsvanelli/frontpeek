@@ -50,6 +50,16 @@ export function mount(options) {
       return;
     }
 
+    if (msg.type === 'pv-resolve-sources') {
+      // Hierarchy picker asking for the source file of each level it shows.
+      var locs = await Promise.all((msg.sources || []).map(safeResolve));
+      window.postMessage(
+        { type: 'pv-sources-resolved', token: msg.token, indices: msg.indices, locs: locs },
+        '*'
+      );
+      return;
+    }
+
     if (msg.type === 'pv-css-prompt') {
       var pc = msg.payload || {};
       if (!pc.changes || !pc.changes.length) return;
