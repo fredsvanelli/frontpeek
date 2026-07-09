@@ -125,7 +125,29 @@ export function installInspector() {
     '#__pv-css-panel .__pv-footer{padding:0 14px;margin-top:10px;}' +
     '#__pv-css-panel .__pv-reset{background:rgba(255,255,255,.08);color:#d4d4d8;border:none;' +
     'border-radius:7px;padding:5px 10px;font-size:12px;font-weight:600;cursor:pointer !important;font-family:inherit;flex-shrink:0;}' +
-    '#__pv-css-panel .__pv-reset:hover{background:rgba(255,255,255,.15);}';
+    '#__pv-css-panel .__pv-reset:hover{background:rgba(255,255,255,.15);}' +
+    '#__pv-hier{position:fixed;z-index:2147483647;min-width:300px;max-width:430px;' +
+    'background:rgba(24,24,27,.97);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);' +
+    'border:1px solid rgba(255,255,255,.12);border-radius:12px;' +
+    'box-shadow:0 16px 48px rgba(0,0,0,.55),0 0 0 1px rgba(0,0,0,.3);padding:6px;display:none;' +
+    "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#e4e4e7;box-sizing:border-box;cursor:default;}" +
+    '#__pv-hier *{box-sizing:border-box;}' +
+    '#__pv-hier .__pv-hier-title{padding:4px 8px 6px;font-size:10px;color:#71717a;' +
+    'text-transform:uppercase;letter-spacing:.07em;user-select:none;}' +
+    '#__pv-hier .__pv-hier-list{max-height:264px;overflow-y:auto;overflow-x:hidden;}' +
+    '#__pv-hier .__pv-hier-row{display:flex;align-items:center;gap:8px;width:100%;text-align:left;' +
+    'background:transparent;border:none;' +
+    'border-radius:6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;' +
+    'line-height:1;padding:6px 8px;cursor:pointer !important;}' +
+    '#__pv-hier .__pv-hier-row:hover{background:rgba(124,58,237,.28);}' +
+    '#__pv-hier .__pv-hier-file{width:96px;flex-shrink:0;color:#71717a;font-size:10px;' +
+    'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}' +
+    '#__pv-hier .__pv-hier-tag{flex:1;min-width:0;color:#7dd3fc;' +
+    'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}' +
+    '#__pv-hier .__pv-hier-comp .__pv-hier-tag{color:#c4b5fd;}' +
+    '#__pv-hier .__pv-hier-more .__pv-hier-tag{color:#a1a1aa;font-weight:600;}' +
+    '#__pv-hier .__pv-hier-row:hover .__pv-hier-tag{color:#fff;}' +
+    '#__pv-hier .__pv-hier-hint{padding:6px 8px 2px;font-size:11px;color:#71717a;user-select:none;}';
   document.documentElement.appendChild(style);
 
   function clearHover() {
@@ -138,6 +160,7 @@ export function installInspector() {
   function setMode(m) {
     if (mode === m) return;
     mode = m;
+    closeHierPicker();
     closePanel();
     closeCssPanel();
     if (mode) {
@@ -151,7 +174,8 @@ export function installInspector() {
   function anyPanelOpen() {
     return (
       (panel && panel.style.display !== 'none') ||
-      (cssPanel && cssPanel.style.display !== 'none')
+      (cssPanel && cssPanel.style.display !== 'none') ||
+      (hierPanel && hierPanel.style.display !== 'none')
     );
   }
 
@@ -159,7 +183,7 @@ export function installInspector() {
     return !!(
       el &&
       el.closest &&
-      el.closest('#__pv-toolbar, #__pv-pop, #__pv-toast, #__pv-panel, #__pv-css-panel')
+      el.closest('#__pv-toolbar, #__pv-pop, #__pv-toast, #__pv-panel, #__pv-css-panel, #__pv-hier')
     );
   }
 
@@ -184,6 +208,19 @@ export function installInspector() {
       history.back();
     } else if (msg.type === 'pv-history-forward') {
       history.forward();
+    } else if (msg.type === 'pv-sources-resolved') {
+      if (msg.token !== hierToken) return; // picker closed/reopened meanwhile
+      if (!hierPanel || hierPanel.style.display === 'none') return;
+      const indices = msg.indices || [];
+      const locs = msg.locs || [];
+      for (let i = 0; i < indices.length; i++) {
+        const lv = hierLevels[indices[i]];
+        if (!lv) continue;
+        const loc = locs[i];
+        lv.filePath = (loc && loc.file) || null;
+        lv.file = lv.filePath ? lv.filePath.split(/[/\\]/).pop() : null;
+      }
+      renderHierRows();
     }
   });
 
@@ -202,6 +239,8 @@ export function installInspector() {
     if (panel && panel.style.display !== 'none' && !panel.contains(e.target)) closePanel();
     if (cssPanel && cssPanel.style.display !== 'none' && !cssPanel.contains(e.target))
       closeCssPanel();
+    if (hierPanel && hierPanel.style.display !== 'none' && !hierPanel.contains(e.target))
+      closeHierPicker();
   }, true);
 
   on(document, 'click', (e) => {
@@ -212,9 +251,27 @@ export function installInspector() {
     e.stopImmediatePropagation();
 
     const debug = { target: describeEl(e.target), walk: [] };
+    let levels = [];
+    try {
+      levels = buildHierarchy(e.target, debug);
+    } catch (err) {
+      debug.error = String((err && err.stack) || err);
+    }
+
+    if (levels.length > 1) {
+      openHierPicker(e.target, levels, debug);
+    } else {
+      // No React hierarchy to choose from — resolve the click directly.
+      dispatchLevel(levels[0] || null, e.target, debug);
+    }
+  }, true);
+
+  // Resolves the chosen hierarchy level and continues the active tool's flow.
+  function dispatchLevel(level, clickedEl, debug) {
+    if (level) debug.pickedLevel = level.label;
     let source = null;
     try {
-      source = findSource(e.target, debug);
+      source = level ? sourceFromFiber(level.fiber, debug) : findSource(clickedEl, debug);
     } catch (err) {
       debug.error = String((err && err.stack) || err);
     }
@@ -224,18 +281,23 @@ export function installInspector() {
       debug.pageErrors = pageErrors.slice();
     }
 
+    const target = (level && domForFiber(level.fiber)) || clickedEl;
     if (mode === 'edit') {
       window.parent.postMessage({ type: 'pv-open-source', source: source, debug: debug }, '*');
       window.parent.postMessage({ type: 'pv-exit-inspect' }, '*');
     } else if (mode === 'css') {
-      openCssPanel(e.target, source);
+      openCssPanel(target, source);
     } else {
-      openPanel(e.target, source);
+      openPanel(target, source);
     }
-  }, true);
+  }
 
   on(document, 'keydown', (e) => {
     if (e.key !== 'Escape' || !mode) return;
+    if (hierPanel && hierPanel.style.display !== 'none') {
+      closeHierPicker();
+      return;
+    }
     if (panel && panel.style.display !== 'none') {
       closePanel();
       return;
@@ -247,6 +309,185 @@ export function installInspector() {
     setMode(null);
     window.parent.postMessage({ type: 'pv-exit-inspect' }, '*');
   }, true);
+
+  // -------------------------------------------------------------------------
+  // Hierarchy picker — clicking an element may match several intents along the
+  // component tree (<Routes> > <Page> > <List> > <p>), so every tool first
+  // shows the deepest 4 levels and lets the user pick which one to resolve.
+  // "[…]" reveals 2 more ancestors per click until the chain is exhausted.
+  // -------------------------------------------------------------------------
+
+  const HIER_INITIAL = 4;
+  const HIER_STEP = 2;
+
+  let hierPanel = null;
+  let hierListEl = null;
+  let hierLevels = [];
+  let hierClickedEl = null;
+  let hierDebug = null;
+  let hierVisible = 0;
+  let hierHoverEl = null;
+  let hierToken = 0; // ties async file resolutions to the current picker instance
+
+  function clearHierHover() {
+    if (hierHoverEl) {
+      hierHoverEl.removeAttribute('data-pv-hover');
+      hierHoverEl = null;
+    }
+  }
+
+  function ensureHierPanel() {
+    if (hierPanel) return;
+    hierPanel = document.createElement('div');
+    hierPanel.id = '__pv-hier';
+
+    const title = document.createElement('div');
+    title.className = '__pv-hier-title';
+    title.textContent = 'Select component';
+    hierPanel.appendChild(title);
+
+    hierListEl = document.createElement('div');
+    hierListEl.className = '__pv-hier-list';
+    hierPanel.appendChild(hierListEl);
+
+    const hint = document.createElement('div');
+    hint.className = '__pv-hier-hint';
+    hint.textContent = '[Esc] to cancel';
+    hierPanel.appendChild(hint);
+
+    document.documentElement.appendChild(hierPanel);
+  }
+
+  function openHierPicker(clickedEl, levels, debug) {
+    ensureHierPanel();
+    closeHierPicker();
+    closePanel();
+    closeCssPanel();
+    clearHover();
+
+    hierLevels = levels;
+    hierClickedEl = clickedEl;
+    hierDebug = debug;
+    hierVisible = Math.min(HIER_INITIAL, levels.length);
+    hierToken++;
+    renderHierRows();
+
+    hierPanel.style.display = 'block';
+    positionHierPanel(clickedEl.getBoundingClientRect());
+    requestHierResolve();
+  }
+
+  // Asks the host (mount.js) to resolve the source file of each visible level
+  // that hasn't been requested yet. Files arrive via 'pv-sources-resolved'.
+  function requestHierResolve() {
+    const indices = [];
+    const sources = [];
+    const max = Math.min(hierVisible, hierLevels.length);
+    for (let i = 0; i < max; i++) {
+      const lv = hierLevels[i];
+      if (lv.requested) continue;
+      lv.requested = true;
+      let src = null;
+      try {
+        src = sourceFromFiber(lv.fiber, { walk: [] });
+      } catch (_) {}
+      indices.push(i);
+      sources.push(src);
+    }
+    if (!indices.length) return;
+    window.parent.postMessage(
+      { type: 'pv-resolve-sources', token: hierToken, indices: indices, sources: sources },
+      '*'
+    );
+  }
+
+  function positionHierPanel(anchorRect) {
+    const pw = hierPanel.offsetWidth;
+    const ph = hierPanel.offsetHeight;
+    const left = Math.min(Math.max(8, anchorRect.left), window.innerWidth - pw - 8);
+    let top = anchorRect.bottom + 8;
+    if (top + ph > window.innerHeight - 8) top = Math.max(8, anchorRect.top - ph - 8);
+    hierPanel.style.left = left + 'px';
+    hierPanel.style.top = top + 'px';
+  }
+
+  function renderHierRows() {
+    clearHierHover();
+    hierListEl.textContent = '';
+    const hasMore = hierVisible < hierLevels.length;
+
+    function makeRow(className, fileName, filePath, indent, tagText) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = className;
+      const fileCell = document.createElement('span');
+      fileCell.className = '__pv-hier-file';
+      fileCell.textContent = fileName || '';
+      if (filePath) fileCell.title = filePath;
+      const tagCell = document.createElement('span');
+      tagCell.className = '__pv-hier-tag';
+      tagCell.style.paddingLeft = indent * 14 + 'px';
+      tagCell.textContent = tagText;
+      row.appendChild(fileCell);
+      row.appendChild(tagCell);
+      return row;
+    }
+
+    if (hasMore) {
+      const more = makeRow('__pv-hier-row __pv-hier-more', null, null, 0, '[…]');
+      more.title = 'Show ' + HIER_STEP + ' more ancestors';
+      more.addEventListener('click', (e) => {
+        e.stopPropagation();
+        hierVisible = Math.min(hierVisible + HIER_STEP, hierLevels.length);
+        const prevTop = hierPanel.getBoundingClientRect().top;
+        renderHierRows();
+        // Re-clamp: the panel grows downward and may run past the viewport.
+        const top = Math.max(8, Math.min(prevTop, window.innerHeight - hierPanel.offsetHeight - 8));
+        hierPanel.style.top = top + 'px';
+        requestHierResolve();
+      });
+      hierListEl.appendChild(more);
+    }
+
+    // hierLevels is deepest-first; render shallowest-first, indented per depth.
+    const visible = hierLevels.slice(0, hierVisible).reverse();
+    visible.forEach((level, i) => {
+      const indent = Math.min(i + (hasMore ? 1 : 0), 12);
+      const row = makeRow(
+        '__pv-hier-row' + (/^[a-z]/.test(level.label) ? '' : ' __pv-hier-comp'),
+        level.file,
+        level.filePath,
+        indent,
+        '<' + level.label + '>'
+      );
+      row.addEventListener('mouseenter', () => {
+        clearHierHover();
+        const dom = domForFiber(level.fiber);
+        if (dom) {
+          hierHoverEl = dom;
+          hierHoverEl.setAttribute('data-pv-hover', '');
+        }
+      });
+      row.addEventListener('mouseleave', clearHierHover);
+      row.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const clickedEl = hierClickedEl;
+        const debug = hierDebug;
+        closeHierPicker();
+        dispatchLevel(level, clickedEl, debug);
+      });
+      hierListEl.appendChild(row);
+    });
+  }
+
+  function closeHierPicker() {
+    clearHierHover();
+    if (hierPanel) hierPanel.style.display = 'none';
+    hierLevels = [];
+    hierClickedEl = null;
+    hierDebug = null;
+    hierVisible = 0;
+  }
 
   // -------------------------------------------------------------------------
   // AI-mode floating panel
@@ -917,6 +1158,65 @@ export function installInspector() {
     return null;
   }
 
+  // Human label for a fiber the user might want to target; null = skip the
+  // level (Fragments, Mode wrappers, providers and other structural noise).
+  function fiberLabel(f) {
+    const t = f.type;
+    if (typeof t === 'string') return t;
+    if (typeof t === 'function') return t.displayName || t.name || 'Anonymous';
+    if (t && typeof t === 'object') {
+      // memo/forwardRef: only worth a level when the inner component has a
+      // real name — generic wrappers are noise the user can't act on.
+      if (typeof t.render === 'function')
+        return t.render.displayName || t.render.name || null;
+      if (t.type) {
+        const inner = t.type;
+        return (typeof inner === 'function' && (inner.displayName || inner.name)) || null;
+      }
+    }
+    if (f.tag === 13) return 'Suspense';
+    return null;
+  }
+
+  // Walks fiber.return from the clicked element's fiber to the root. Returns
+  // [{ fiber, label }, …] deepest-first; empty when the page isn't React.
+  function buildHierarchy(el, debug) {
+    const fiber = getFiber(el, debug);
+    if (!fiber) return [];
+    const levels = [];
+    let f = fiber;
+    let guard = 0;
+    while (f && guard++ < 500) {
+      const label = fiberLabel(f);
+      if (label) levels.push({ fiber: f, label: label });
+      f = f.return;
+    }
+    return levels;
+  }
+
+  // Nearest DOM element rendered by a fiber (itself when it's a host fiber,
+  // otherwise the first host descendant). Tags 5/26/27 are HostComponent /
+  // HostHoistable / HostSingleton.
+  function domForFiber(fiber) {
+    let node = fiber;
+    let guard = 0;
+    while (node && guard++ < 2000) {
+      if (
+        (node.tag === 5 || node.tag === 26 || node.tag === 27) &&
+        node.stateNode instanceof Element
+      )
+        return node.stateNode;
+      if (node.child) {
+        node = node.child;
+        continue;
+      }
+      while (node && node !== fiber && !node.sibling) node = node.return;
+      if (!node || node === fiber) return null;
+      node = node.sibling;
+    }
+    return null;
+  }
+
   function stackToString(s) {
     if (!s) return null;
     if (typeof s === 'string') return s;
@@ -988,7 +1288,10 @@ export function installInspector() {
   function findSource(el, debug) {
     const fiber = getFiber(el, debug);
     if (!fiber) return null;
+    return sourceFromFiber(fiber, debug);
+  }
 
+  function sourceFromFiber(fiber, debug) {
     let componentName = null;
     let f = fiber;
     let guard = 0;
@@ -1107,10 +1410,11 @@ export function installInspector() {
     for (const method of ['pushState', 'replaceState']) {
       if (patchedHistory[method]) history[method] = patchedHistory[method];
     }
-    [style, panel, cssPanel].forEach((el) => {
+    closeHierPicker();
+    [style, panel, cssPanel, hierPanel].forEach((el) => {
       if (el && el.parentNode) el.parentNode.removeChild(el);
     });
-    panel = cssPanel = null;
+    panel = cssPanel = hierPanel = null;
     window.__PV_INSTALLED__ = false;
   }
 

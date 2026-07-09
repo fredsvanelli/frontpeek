@@ -1,6 +1,6 @@
 {
   "name": "@fredsvanelli/frontpeek",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Click any element in your running React/Next app to jump to its source — or copy the component path / an AI prompt. A floating toolbar that works standalone, and opens VS Code when the companion extension is running.",
   "type": "module",
   "main": "./src/index.js",
