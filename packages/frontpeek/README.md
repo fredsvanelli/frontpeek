@@ -6,6 +6,8 @@ A floating dev toolbar for React / Next.js apps. Click any element in your runni
 - **Edit** — tweak an element's styles in a live editor and copy the change as a ready-to-paste AI prompt.
 - **Prompt** — click an element, describe a change, and copy a structured prompt that already points at the right file and JSX.
 
+A click rarely has just one valid target — the element sits inside a whole component hierarchy (`<Routes> > <Page> > <List> > <p>`), and your intent may live at any level of it. So after you click, all three tools open a small picker listing the 4 deepest levels of that hierarchy; choose the one you meant and it is resolved. Click `[…]` at the top to reveal 2 more ancestors at a time, hover a row to highlight what it covers on the page, and press `Esc` to cancel.
+
 The toolbar is **self-contained** — it needs no browser extension and no proxy. Source resolution runs in the browser against your own dev server (the same endpoints Next's error overlay uses), so it works at your app's real origin, with real cookies and auth.
 
 ## Install
