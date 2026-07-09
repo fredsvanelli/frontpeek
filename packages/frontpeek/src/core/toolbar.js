@@ -61,7 +61,12 @@ export function createToolbar() {
     'text-transform:uppercase;letter-spacing:.07em;}' +
     '#__pv-pop select{width:calc(100% - 6px);height:30px;margin:0 3px 3px;padding:0 8px;' +
     'background:#2a2a2a;color:#e4e4e7;border:1px solid #ffffff26;border-radius:6px;' +
-    'font-size:12px;font-family:inherit;cursor:pointer;}';
+    'font-size:12px;font-family:inherit;cursor:pointer;}' +
+    // Below 768px, collapse the main buttons to icon-only.
+    '@media (max-width:767px){' +
+    '#__pv-toolbar button span{display:none;}' +
+    '#__pv-toolbar button{gap:0;padding:0 8px;}' +
+    '}';
 
   var styleEl = document.createElement('style');
   styleEl.textContent = css;
@@ -113,13 +118,13 @@ export function createToolbar() {
   // -- settings: position, hide, config popover -----------------------------
   var POS_LABELS = [
     ['top-left', 'Top-left'], ['top-center', 'Top-center'], ['top-right', 'Top-right'],
-    ['bottom-left', 'Bottom-left'], ['bottom-middle', 'Bottom-middle'], ['bottom-right', 'Bottom-right'],
+    ['bottom-left', 'Bottom-left'], ['bottom-center', 'Bottom-center'], ['bottom-right', 'Bottom-right'],
   ];
   var VALID_POS = {};
   POS_LABELS.forEach(function (o) { VALID_POS[o[0]] = true; });
   var MARGIN = 16;
   var STORE = 'frontpeek:ui';
-  var state = { position: 'bottom-middle', hidden: false };
+  var state = { position: 'bottom-center', hidden: false };
   try {
     var raw = localStorage.getItem(STORE);
     if (raw) {
