@@ -100,6 +100,14 @@ export function installInspector() {
     '#__pv-css-panel .__pv-css-head>span:first-child{flex:1;min-width:0;' +
     'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}' +
     '#__pv-css-panel .__pv-css-grip{flex-shrink:0;color:#52525b;font-size:12px;letter-spacing:1px;}' +
+    '#__pv-css-panel .__pv-css-text{padding:10px 14px 0;}' +
+    '#__pv-css-panel .__pv-css-text>span{display:block;font-size:9px;color:#71717a;' +
+    'text-transform:uppercase;letter-spacing:.07em;margin-bottom:4px;}' +
+    '#__pv-css-panel .__pv-css-text.__pv-changed>span{color:#c4b5fd;font-weight:700;}' +
+    '#__pv-css-panel textarea{width:100%;min-height:26px;max-height:120px;resize:vertical;display:block;' +
+    'background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:6px;' +
+    'color:#f4f4f5;font-family:inherit;font-size:11px;line-height:1.4;padding:5px 7px;outline:none;}' +
+    '#__pv-css-panel textarea:focus{border-color:#7c3aed;}' +
     '#__pv-css-panel .__pv-css-tabs{display:flex;gap:2px;padding:8px 12px 0;border-bottom:1px solid rgba(255,255,255,.08);}' +
     '#__pv-css-panel .__pv-css-tab{background:transparent;border:none;border-bottom:2px solid transparent;' +
     'color:#a1a1aa;font-family:inherit;font-size:11px;font-weight:600;padding:7px 9px;cursor:pointer !important;}' +
@@ -729,8 +737,25 @@ export function installInspector() {
   let cssOriginal = {};
   let cssChanges = {};
   const cssRows = {};
+  let cssTextSection = null;
+  let cssTextInput = null;
+  let cssOrigText = null; // original textContent; null when the target isn't a text-editable leaf
+  let cssTextChanged = false;
   let cssCopiedTimer = null;
   let cssFadeTimer = null;
+
+  // Tags whose visible content isn't a plain editable text node.
+  const TEXT_UNEDITABLE = {
+    IMG: 1, INPUT: 1, TEXTAREA: 1, SELECT: 1, BR: 1, HR: 1, SVG: 1, CANVAS: 1,
+    VIDEO: 1, AUDIO: 1, IFRAME: 1, OBJECT: 1, EMBED: 1, SOURCE: 1, PICTURE: 1,
+  };
+
+  // A "final" (leaf) element: no element children and safe to edit as text.
+  function isTextEditable(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (TEXT_UNEDITABLE[el.tagName]) return false;
+    return el.children.length === 0;
+  }
 
   function makeDraggable(panelEl, handleEl) {
     let dragging = false;
@@ -754,16 +779,40 @@ export function installInspector() {
     on(document, 'mouseup', () => (dragging = false), true);
   }
 
+  let hexCtx = null; // lazy 2D canvas context, used to resolve any CSS color
   function cssToHex(v) {
     if (!v) return null;
     v = v.trim();
     if (/^#[0-9a-f]{6}([0-9a-f]{2})?$/i.test(v)) return v.slice(0, 7);
     if (/^#[0-9a-f]{3}$/i.test(v))
       return '#' + v[1] + v[1] + v[2] + v[2] + v[3] + v[3];
-    const m = v.match(/^rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/i);
-    if (!m) return null;
     const h = (n) => ('0' + Math.min(255, +n).toString(16)).slice(-2);
-    return '#' + h(m[1]) + h(m[2]) + h(m[3]);
+    const m = v.match(/^rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/i);
+    if (m) return '#' + h(m[1]) + h(m[2]) + h(m[3]);
+    // Fallback: let the browser resolve named colors, hsl(), hwb(), lab(),
+    // lch(), oklab(), oklch(), color(), … by rendering a pixel and reading it
+    // back, so the swatch always reflects the value in its input. Reading a
+    // pixel handles modern color spaces whose fillStyle serialization is not
+    // hex/rgb() (e.g. lab() stays lab(), which the regexes above never match).
+    try {
+      if (!hexCtx)
+        hexCtx = document
+          .createElement('canvas')
+          .getContext('2d', { willReadFrequently: true });
+      // Validity check: an invalid value leaves fillStyle at the sentinel, so
+      // two different sentinels disagree. A valid value overrides both.
+      hexCtx.fillStyle = '#000';
+      hexCtx.fillStyle = v;
+      const a = hexCtx.fillStyle;
+      hexCtx.fillStyle = '#fff';
+      hexCtx.fillStyle = v;
+      if (a !== hexCtx.fillStyle) return null; // invalid: sentinels retained
+      hexCtx.clearRect(0, 0, 1, 1);
+      hexCtx.fillRect(0, 0, 1, 1);
+      const d = hexCtx.getImageData(0, 0, 1, 1).data;
+      return '#' + h(d[0]) + h(d[1]) + h(d[2]);
+    } catch (_) {}
+    return null;
   }
 
   function ensureOption(sel, val) {
@@ -828,6 +877,20 @@ export function installInspector() {
     cssHeadEl.appendChild(grip);
     makeDraggable(cssPanel, cssHeadEl);
     cssPanel.appendChild(cssHeadEl);
+
+    // Text-content editor — only shown for leaf ("final") elements.
+    cssTextSection = document.createElement('div');
+    cssTextSection.className = '__pv-css-text';
+    cssTextSection.style.display = 'none';
+    const textCap = document.createElement('span');
+    textCap.textContent = 'Text content';
+    cssTextSection.appendChild(textCap);
+    cssTextInput = document.createElement('textarea');
+    cssTextInput.rows = 1;
+    cssTextInput.spellcheck = false;
+    cssTextInput.addEventListener('input', () => applyCssText(cssTextInput.value));
+    cssTextSection.appendChild(cssTextInput);
+    cssPanel.appendChild(cssTextSection);
 
     const tabsEl = document.createElement('div');
     tabsEl.className = '__pv-css-tabs';
@@ -941,6 +1004,17 @@ export function installInspector() {
 
     cssHeadNameEl.textContent = describeEl(target);
 
+    cssTextChanged = false;
+    if (isTextEditable(target)) {
+      cssOrigText = target.textContent || '';
+      cssTextInput.value = cssOrigText;
+      cssTextSection.classList.remove('__pv-changed');
+      cssTextSection.style.display = '';
+    } else {
+      cssOrigText = null;
+      cssTextSection.style.display = 'none';
+    }
+
     const cs = getComputedStyle(target);
     for (const prop in cssRows) {
       const val = (cs.getPropertyValue(prop) || '').trim();
@@ -977,6 +1051,10 @@ export function installInspector() {
     void cssTarget.getAttribute('style');
     if (cssOrigInline == null) cssTarget.removeAttribute('style');
     else cssTarget.setAttribute('style', cssOrigInline);
+    if (cssTextChanged && cssOrigText != null) {
+      cssTarget.textContent = cssOrigText;
+      cssTextChanged = false;
+    }
   }
 
   function closeCssPanel() {
@@ -998,6 +1076,11 @@ export function installInspector() {
     if (!cssTarget) return;
     revertCssEdits();
     cssChanges = {};
+    if (cssOrigText != null) {
+      cssTextInput.value = cssOrigText;
+      cssTextSection.classList.remove('__pv-changed');
+    }
+    cssTextChanged = false;
     for (const prop in cssRows) {
       const r = cssRows[prop];
       if (r.input.tagName === 'SELECT') ensureOption(r.input, cssOriginal[prop]);
@@ -1026,8 +1109,17 @@ export function installInspector() {
     updateCssFooter();
   }
 
+  function applyCssText(value) {
+    if (!cssTarget || cssOrigText == null) return;
+    cssTarget.textContent = value;
+    cssTextChanged = value !== cssOrigText;
+    cssTextSection.classList.toggle('__pv-changed', cssTextChanged);
+    cssCopyLbl.textContent = 'Copy Prompt';
+    updateCssFooter();
+  }
+
   function updateCssFooter() {
-    const n = Object.keys(cssChanges).length;
+    const n = Object.keys(cssChanges).length + (cssTextChanged ? 1 : 0);
     cssHintEl.textContent = n
       ? n + (n === 1 ? ' change' : ' changes') + ' · [Esc] discards'
       : 'Edits preview live';
@@ -1040,12 +1132,16 @@ export function installInspector() {
     for (const prop in cssChanges) {
       changes.push({ prop: prop, from: cssOriginal[prop] || 'unset', to: cssChanges[prop] });
     }
-    if (!changes.length) return;
+    const textChange = cssTextChanged
+      ? { from: cssOrigText, to: cssTextInput.value }
+      : null;
+    if (!changes.length && !textChange) return;
     window.parent.postMessage(
       {
         type: 'pv-css-prompt',
         payload: {
           changes: changes,
+          textChange: textChange,
           source: cssPending.source,
           element: cssPending.element,
           url: cssPending.url,

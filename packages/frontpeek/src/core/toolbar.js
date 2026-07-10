@@ -11,7 +11,11 @@
 
 export function createToolbar() {
   var mode = null; // null | 'edit' | 'ai' | 'css'
+  var connected = false; // whether the VS Code extension is attached
   var listeners = []; // [target, type, fn, opts] for clean teardown
+
+  var CONNECTOR_URL =
+    'https://marketplace.visualstudio.com/items?itemName=fredsvanelli.frontpeek';
 
   function on(target, type, fn, opts) {
     target.addEventListener(type, fn, opts);
@@ -40,9 +44,9 @@ export function createToolbar() {
     '#__pv-toolbar #__pv-edit.active{background:#2f81f7;border-color:#2f81f7;}' +
     '#__pv-toolbar #__pv-css.active{background:linear-gradient(135deg,#0ea5e9,#2563eb);}' +
     '#__pv-toolbar #__pv-ai.active{background:linear-gradient(135deg,#7c3aed,#4f46e5);}' +
-    '#__pv-toolbar .__pv-dot{width:7px;height:7px;border-radius:50%;background:#f87171;flex-shrink:0;' +
-    'margin:0 4px;transition:background .2s;}' +
-    '#__pv-toolbar .__pv-dot.__pv-live{background:#4ade80;}' +
+    '#__pv-toolbar .__pv-dot{width:7px;height:7px;border-radius:50%;background:#facc15;flex-shrink:0;' +
+    'margin:0 4px;cursor:pointer;transition:background .2s;}' +
+    '#__pv-toolbar .__pv-dot.__pv-live{background:#4ade80;cursor:default;}' +
     '#__pv-toolbar .__pv-cogsep{width:1px;height:20px;background:#ffffff1f;margin:0 3px;flex-shrink:0;}' +
     '#__pv-toolbar #__pv-cog{padding:0 8px;}' +
     '#__pv-toolbar #__pv-cog.__pv-on{background:#ffffff14;color:#fff;}' +
@@ -62,6 +66,25 @@ export function createToolbar() {
     '#__pv-pop select{width:calc(100% - 6px);height:30px;margin:0 3px 3px;padding:0 8px;' +
     'background:#2a2a2a;color:#e4e4e7;border:1px solid #ffffff26;border-radius:6px;' +
     'font-size:12px;font-family:inherit;cursor:pointer;}' +
+    // Connect popover — shown when the dot (standalone) is clicked.
+    '#__pv-cpop{all:initial;display:none;position:fixed;z-index:2147483647;width:250px;padding:12px;' +
+    'background:#1e1e1eF7;border:1px solid #ffffff1f;border-radius:10px;box-shadow:0 12px 34px #000a;' +
+    'backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);' +
+    "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}" +
+    '#__pv-cpop *{box-sizing:border-box;}' +
+    '#__pv-cpop .__pv-ctitle{display:flex;align-items:center;gap:7px;color:#fff;font-size:12.5px;' +
+    'font-weight:600;margin-bottom:7px;}' +
+    '#__pv-cpop .__pv-ctitle .__pv-cdot{width:7px;height:7px;border-radius:50%;background:#facc15;flex-shrink:0;}' +
+    '#__pv-cpop .__pv-ctext{display:block;color:#b4b4b8;font-size:11.5px;line-height:1.5;margin-bottom:11px;}' +
+    '#__pv-cpop .__pv-ctext b{color:#e4e4e7;font-weight:600;}' +
+    '#__pv-cpop .__pv-crow{display:flex;gap:7px;}' +
+    '#__pv-cpop .__pv-cbtn{flex:1;display:flex;align-items:center;justify-content:center;height:30px;' +
+    'border-radius:7px;font-size:12px;font-family:inherit;line-height:1;cursor:pointer;' +
+    'border:1px solid transparent;text-decoration:none;}' +
+    '#__pv-cpop .__pv-cbtn.primary{background:#2f81f7;color:#fff;}' +
+    '#__pv-cpop .__pv-cbtn.primary:hover{background:#4c94f8;}' +
+    '#__pv-cpop .__pv-cbtn.ghost{background:transparent;border-color:#ffffff26;color:#d4d4d8;}' +
+    '#__pv-cpop .__pv-cbtn.ghost:hover{background:#ffffff14;color:#fff;}' +
     // Below 768px, collapse the main buttons to icon-only.
     '@media (max-width:767px){' +
     '#__pv-toolbar button span{display:none;}' +
@@ -76,7 +99,7 @@ export function createToolbar() {
   bar.id = '__pv-toolbar';
   bar.innerHTML =
     '<span class="__pv-grip" title="Drag">⋮⋮</span>' +
-    '<span class="__pv-dot" title="Standalone — clicking Code copies the component path"></span>' +
+    '<span class="__pv-dot" title="Standalone — click to connect FrontPeek to VS Code"></span>' +
     '<button id="__pv-edit" title="Code: click an element to open its source (or copy its path)">' +
     '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 3.5 1.5 8l4 4.5M10.5 3.5l4 4.5-4 4.5"/></svg>' +
     '<span>Code</span></button>' +
@@ -248,6 +271,60 @@ export function createToolbar() {
     if (e.key === 'Escape' && popOpen) closePopover();
   });
 
+  // -- connect popover (dot) --
+  var cpop = null, cpopOpen = false;
+  function ensureConnectPopover() {
+    if (cpop) return cpop;
+    cpop = document.createElement('div');
+    cpop.id = '__pv-cpop';
+    cpop.innerHTML =
+      '<span class="__pv-ctitle"><span class="__pv-cdot"></span>Not connected to the IDE</span>' +
+      '<span class="__pv-ctext">To get the most out of FrontPeek, install the IDE extension ' +
+      '<b>Frontpeek (connector)</b>. It lets <b>Code</b> jump straight to your component in the editor.</span>' +
+      '<div class="__pv-crow">' +
+      '<a class="__pv-cbtn primary" data-act="install" href="' + CONNECTOR_URL + '" ' +
+      'target="_blank" rel="noopener noreferrer">Install</a>' +
+      '<button class="__pv-cbtn ghost" data-act="ignore">Ignore</button>' +
+      '</div>';
+    document.body.appendChild(cpop);
+    on(cpop, 'click', function (e) {
+      var b = e.target.closest('.__pv-cbtn');
+      if (!b) return;
+      // Install is a real link (opens in a new tab); just close the popover.
+      closeConnectPopover();
+    });
+    return cpop;
+  }
+  function openConnectPopover() {
+    ensureConnectPopover();
+    cpop.style.display = 'block';
+    cpop.style.visibility = 'hidden';
+    var r = dotEl.getBoundingClientRect();
+    var pw = cpop.offsetWidth, ph = cpop.offsetHeight;
+    var left = Math.max(8, Math.min(window.innerWidth - pw - 8, r.left + r.width / 2 - pw / 2));
+    var top = (r.top - ph - 8 >= 8) ? (r.top - ph - 8) : (r.bottom + 8);
+    cpop.style.left = left + 'px';
+    cpop.style.top = top + 'px';
+    cpop.style.visibility = 'visible';
+    cpopOpen = true;
+  }
+  function closeConnectPopover() {
+    if (cpop) cpop.style.display = 'none';
+    cpopOpen = false;
+  }
+
+  on(dotEl, 'click', function (e) {
+    e.stopPropagation();
+    if (connected) return; // green dot — nothing to set up
+    if (cpopOpen) closeConnectPopover(); else openConnectPopover();
+  });
+  on(document, 'mousedown', function (e) {
+    if (cpopOpen && cpop && !cpop.contains(e.target) && !dotEl.contains(e.target)) closeConnectPopover();
+  }, true);
+  on(document, 'keydown', function (e) {
+    if (e.key === 'Escape' && cpopOpen) closeConnectPopover();
+  });
+
   function restoreUI() {
     bar.style.transition = 'none';
     if (state.hidden) { bar.classList.add('__pv-hidden'); dockHidden(5); }
@@ -283,10 +360,12 @@ export function createToolbar() {
 
   // -- public API -----------------------------------------------------------
   function setConnected(v) {
-    dotEl.classList.toggle('__pv-live', !!v);
-    dotEl.title = v
+    connected = !!v;
+    dotEl.classList.toggle('__pv-live', connected);
+    dotEl.title = connected
       ? 'Connected to the FrontPeek extension — Code opens VS Code'
-      : 'Standalone — clicking Code copies the component path';
+      : 'Standalone — click to connect FrontPeek to VS Code';
+    if (connected) closeConnectPopover();
   }
 
   function mount() {
@@ -297,9 +376,10 @@ export function createToolbar() {
 
   function destroy() {
     closePopover();
+    closeConnectPopover();
     listeners.forEach(function (l) { l[0].removeEventListener(l[1], l[2], l[3]); });
     listeners = [];
-    [pop, bar, styleEl].forEach(function (el) {
+    [cpop, pop, bar, styleEl].forEach(function (el) {
       if (el && el.parentNode) el.parentNode.removeChild(el);
     });
   }

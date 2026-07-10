@@ -62,9 +62,9 @@ export function mount(options) {
 
     if (msg.type === 'pv-css-prompt') {
       var pc = msg.payload || {};
-      if (!pc.changes || !pc.changes.length) return;
+      if ((!pc.changes || !pc.changes.length) && !pc.textChange) return;
       var loc3 = await safeResolve(pc.source);
-      var cssText = buildCssPrompt(pc.changes, loc3, pc.source, pc.element, pc.url);
+      var cssText = buildCssPrompt(pc.changes, loc3, pc.source, pc.element, pc.url, pc.textChange);
       await clipboard.write(cssText);
       window.postMessage({ type: 'pv-css-copied', ok: true }, '*');
       return;
