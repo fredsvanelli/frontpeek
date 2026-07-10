@@ -1,10 +1,11 @@
 {
   "name": "frontpeek",
-  "displayName": "FrontPeek",
-  "description": "Companion for the @fredsvanelli/frontpeek toolbar: click an element's \"Code\" button in your running app to open its source in this editor.",
-  "version": "0.4.0",
-  "publisher": "fred",
+  "displayName": "Frontpeek (connector)",
+  "description": "Official connector for the @fredsvanelli/frontpeek npm package: click an element's \"Code\" button in your running app to open its source in this editor.",
+  "version": "0.5.0",
+  "publisher": "fredsvanelli",
   "license": "MIT",
+  "icon": "frontpeek.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/fredsvanelli/frontpeek.git",
@@ -26,6 +27,18 @@
         "command": "frontPeek.showOutput",
         "title": "FrontPeek: Show Output"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "FrontPeek",
+      "properties": {
+        "frontPeek.port": {
+          "type": "integer",
+          "default": 57420,
+          "minimum": 1,
+          "maximum": 65535,
+          "markdownDescription": "Loopback port the bridge listens on. If you change this, pass the same value to the toolbar via the `bridgePort` prop (`<FrontPeek bridgePort={57420} />`) so it probes the right port. Changing this restarts the bridge."
+        }
+      }
+    }
   }
 }

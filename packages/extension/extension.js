@@ -30,12 +30,31 @@ function log(msg) {
   if (output) output.appendLine(`[${new Date().toISOString()}] ${msg}`);
 }
 
+// The port the user configured (`frontPeek.port`), falling back to the default
+// if it is unset or out of the valid 1–65535 range.
+function configuredPort() {
+  const value = vscode.workspace.getConfiguration('frontPeek').get('port');
+  if (Number.isInteger(value) && value >= 1 && value <= 65535) return value;
+  return BRIDGE_DEFAULT_PORT;
+}
+
 function activate(context) {
   output = vscode.window.createOutputChannel('FrontPeek');
   context.subscriptions.push(output);
 
   context.subscriptions.push(
     vscode.commands.registerCommand('frontPeek.showOutput', () => output.show())
+  );
+
+  // Restart the bridge when the configured port changes so it takes effect
+  // without a reload.
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('frontPeek.port')) {
+        log('Port setting changed; restarting bridge.');
+        restartBridge().catch((err) => log(`Bridge restart failed: ${err.message}`));
+      }
+    })
   );
 
   startBridge().catch((err) => log(`Bridge failed to start: ${err.message}`));
@@ -57,7 +76,26 @@ function deactivate() {
 // ---------------------------------------------------------------------------
 
 function bridgeOrigin() {
-  return `http://localhost:${bridgePort || BRIDGE_DEFAULT_PORT}`;
+  return `http://localhost:${bridgePort || configuredPort()}`;
+}
+
+// Tear the running bridge down and start it again — used when the port setting
+// changes. Clears the SSE clients so the toolbar reconnects on the new port.
+function restartBridge() {
+  for (const res of sseClients) {
+    try { res.end(); } catch { }
+  }
+  sseClients.clear();
+  return new Promise((resolve) => {
+    if (bridgeServer) {
+      const server = bridgeServer;
+      bridgeServer = null;
+      bridgePort = null;
+      server.close(() => resolve());
+    } else {
+      resolve();
+    }
+  }).then(() => startBridge());
 }
 
 // Only loopback web origins may drive the bridge. With CORS `*` the browser
@@ -138,6 +176,8 @@ function startBridge() {
     res.end('FrontPeek bridge');
   });
 
+  const wantedPort = configuredPort();
+
   return new Promise((resolve) => {
     const onListen = () => {
       bridgeServer = server;
@@ -146,13 +186,13 @@ function startBridge() {
       resolve(bridgePort);
     };
     server.once('error', () => {
-      // Default port busy — fall back to a random one. Note: the toolbar probes
-      // the fixed default port, so a fallback port means open-in-editor won't be
-      // detected until the port is freed. We log it so it's diagnosable.
-      log(`Port ${BRIDGE_DEFAULT_PORT} busy; falling back to a random port.`);
+      // Configured port busy — fall back to a random one. Note: the toolbar
+      // probes the configured port, so a fallback port means open-in-editor
+      // won't be detected until the port is freed. We log it so it's diagnosable.
+      log(`Port ${wantedPort} busy; falling back to a random port.`);
       server.listen(0, '127.0.0.1', onListen);
     });
-    server.listen(BRIDGE_DEFAULT_PORT, '127.0.0.1', onListen);
+    server.listen(wantedPort, '127.0.0.1', onListen);
   });
 }
 
