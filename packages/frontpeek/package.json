@@ -32,7 +32,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/fredsvanelli/frontpeek.git",
+    "url": "git+https://github.com/fredsvanelli/frontpeek.git",
     "directory": "packages/frontpeek"
   },
   "author": "Fred Vanelli"
